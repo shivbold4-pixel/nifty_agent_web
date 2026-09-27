@@ -1,6 +1,7 @@
 # Nifty Agent - Mobile Web UI
 import time
 import json
+import io
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import quote
@@ -70,6 +71,7 @@ if "agent" not in st.session_state:
     st.session_state.history = []
     st.session_state.last_pred = None
     st.session_state.uploaded_seen = set()
+    st.session_state.df = None
 
 agent = st.session_state.agent
 
@@ -83,26 +85,27 @@ with st.expander("Settings", expanded=False):
     vix = st.slider("India VIX", 8.0, 40.0, 14.0, 0.1)
     auto_label = st.checkbox("Auto-learn from previous prediction", value=True)
 
-uploaded = st.file_uploader("Upload option chain", type=None, help="Any CSV, Excel, or text file. On mobile, tap Browse and select your file.")
+uploaded = st.file_uploader("Upload option chain", type=None,
+                             help="Any CSV or Excel file. On mobile, tap Browse and select your file.")
 
 if uploaded is not None:
     fingerprint = f"{uploaded.name}:{uploaded.size}:{spot_override}"
     if fingerprint not in st.session_state.uploaded_seen:
         with st.spinner("Analyzing..."):
-            try:
-                # Read file content, auto-detect type from content (not just extension)
+            # Read file bytes once
             try:
                 file_bytes = uploaded.read()
-                uploaded.seek(0)
-                import io as _io
-                # Detect Excel by magic bytes (PK zip header)
-                if file_bytes[:2] == b"PK":
-                    df = parse_option_chain(_io.BytesIO(file_bytes))
-                else:
-                    df = parse_option_chain(_io.BytesIO(file_bytes))
-            except Exception as _e:
-                st.error(f"Could not parse file: {_e}")
+            except Exception as e:
+                st.error(f"Could not read file: {e}")
                 st.stop()
+
+            if not file_bytes:
+                st.error("File is empty.")
+                st.stop()
+
+            # Parse
+            try:
+                df = parse_option_chain(io.BytesIO(file_bytes))
             except Exception as e:
                 st.error(f"Could not parse file: {e}")
                 st.stop()
@@ -115,10 +118,7 @@ if uploaded is not None:
                 st.error(f"No 'strike' column found. Columns: {list(df.columns)}")
                 st.stop()
 
-            if "call_oi" not in df.columns or "put_oi" not in df.columns:
-                st.error(f"Missing OI columns. Parsed columns: {list(df.columns)}")
-                st.stop()
-
+            # Auto-label previous prediction
             try:
                 if auto_label and st.session_state.last_pred is not None:
                     if "call_ltp" in df.columns and "put_ltp" in df.columns:
@@ -129,6 +129,7 @@ if uploaded is not None:
             except Exception:
                 pass
 
+            # Predict
             try:
                 spot_arg = spot_override if spot_override > 0 else None
                 agent.on_option_chain(df, spot=spot_arg, vix=vix)
@@ -140,27 +141,34 @@ if uploaded is not None:
             st.session_state.last_pred = pred
             st.session_state.uploaded_seen.add(fingerprint)
             st.session_state.df = df
+
             st.session_state.history.append({
                 "time": datetime.fromtimestamp(pred.ts).strftime("%H:%M:%S"),
-                "spot": round(pred.spot, 1), "direction": pred.direction,
-                "score": pred.score, "confidence": pred.confidence,
-                "regime": pred.regime, "action": pred.action,
+                "spot": round(pred.spot, 1),
+                "direction": pred.direction,
+                "score": pred.score,
+                "confidence": pred.confidence,
+                "regime": pred.regime,
+                "action": pred.action,
             })
 
+            # Log
             try:
                 log_path = Path("logs") / f"predictions_{datetime.now():%Y%m%d}.jsonl"
                 log_path.parent.mkdir(exist_ok=True)
                 with open(log_path, "a") as f:
                     f.write(json.dumps({
-                        "ts": pred.ts, "spot": pred.spot, "direction": pred.direction,
-                        "score": pred.score, "confidence": pred.confidence,
-                        "regime": pred.regime, "action": pred.action,
+                        "ts": pred.ts, "spot": pred.spot,
+                        "direction": pred.direction, "score": pred.score,
+                        "confidence": pred.confidence, "regime": pred.regime,
+                        "action": pred.action,
                         "stop": pred.stop_loss, "target": pred.take_profit,
                         "contributions": pred.contributions,
                     }) + "\n")
             except Exception:
                 pass
 
+# ---- Render ----
 pred = st.session_state.last_pred
 if pred is not None:
     dir_class = {"BULLISH": "hero-bull", "BEARISH": "hero-bear"}.get(pred.direction, "hero-flat")
@@ -172,11 +180,13 @@ if pred is not None:
     </div>""", unsafe_allow_html=True)
     st.markdown(f"**Confidence: {pred.confidence}%**")
     st.progress(min(int(pred.confidence), 100))
+
     plan_class = "plan-card"
     if pred.direction == "BEARISH":
         plan_class += " bear"
     elif pred.direction == "FLAT":
         plan_class += " flat"
+
     if pred.action.startswith(("BUY", "SELL")):
         st.markdown(f"""<div class="{plan_class}">
             <div class="plan-title">{pred.action}</div>
@@ -203,7 +213,7 @@ if pred is not None:
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
     with st.expander("Parsed data preview (first 5 rows)", expanded=False):
-        if "df" in st.session_state:
+        if st.session_state.df is not None:
             st.dataframe(st.session_state.df.head(5), use_container_width=True, hide_index=True)
             st.caption(f"Parsed {len(st.session_state.df)} rows, {len(st.session_state.df.columns)} columns")
         else:
