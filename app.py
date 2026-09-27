@@ -83,14 +83,26 @@ with st.expander("Settings", expanded=False):
     vix = st.slider("India VIX", 8.0, 40.0, 14.0, 0.1)
     auto_label = st.checkbox("Auto-learn from previous prediction", value=True)
 
-uploaded = st.file_uploader("Upload option chain", type=["csv", "xlsx"])
+uploaded = st.file_uploader("Upload option chain", type=None, help="Any CSV, Excel, or text file. On mobile, tap Browse and select your file.")
 
 if uploaded is not None:
     fingerprint = f"{uploaded.name}:{uploaded.size}:{spot_override}"
     if fingerprint not in st.session_state.uploaded_seen:
         with st.spinner("Analyzing..."):
             try:
-                df = parse_option_chain(uploaded)
+                # Read file content, auto-detect type from content (not just extension)
+            try:
+                file_bytes = uploaded.read()
+                uploaded.seek(0)
+                import io as _io
+                # Detect Excel by magic bytes (PK zip header)
+                if file_bytes[:2] == b"PK":
+                    df = parse_option_chain(_io.BytesIO(file_bytes))
+                else:
+                    df = parse_option_chain(_io.BytesIO(file_bytes))
+            except Exception as _e:
+                st.error(f"Could not parse file: {_e}")
+                st.stop()
             except Exception as e:
                 st.error(f"Could not parse file: {e}")
                 st.stop()
