@@ -1,0 +1,298 @@
+﻿# ============================================================
+# NIFTY AGENT - Core Engine
+# ============================================================
+import time
+import numpy as np
+import pandas as pd
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+import pickle
+import yaml
+
+CONFIG_PATH = Path(__file__).parent / "config.yaml"
+LOG_DIR = Path(__file__).parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+
+def load_config(path=CONFIG_PATH):
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+FEATURES = [
+    "pcr", "pcr_change", "iv_skew", "wall_asymmetry", "straddle_bps",
+    "obi", "weighted_obi", "ofi", "microprice_drift", "queue_imb",
+    "cvd_slope", "delta_ratio",
+]
+
+
+@dataclass
+class Prediction:
+    ts: float
+    spot: float
+    direction: str
+    score: float
+    confidence: float
+    expected_points: float
+    regime: str
+    size_mult: float
+    action: str
+    stop_loss: float
+    take_profit: float
+    contributions: dict
+    features: dict
+
+
+def option_features(df, spot=None):
+    df = df.copy()
+    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+    alias = {
+        "call_oi": ["ce_oi"], "put_oi": ["pe_oi"],
+        "call_oi_change": ["ce_oi_change"], "put_oi_change": ["pe_oi_change"],
+        "call_ltp": ["ce_ltp"], "put_ltp": ["pe_ltp"],
+        "call_iv": ["ce_iv"], "put_iv": ["pe_iv"],
+    }
+    for tgt, opts in alias.items():
+        if tgt not in df.columns:
+            for o in opts:
+                if o in df.columns:
+                    df[tgt] = df[o]; break
+    for c in df.columns:
+        if df[c].dtype == object:
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ""), errors="coerce")
+    df = df.dropna(subset=["strike"]).sort_values("strike").reset_index(drop=True)
+    if spot is None:
+        diff = (df.call_ltp - df.put_ltp).abs()
+        spot = float(df.loc[diff.idxmin(), "strike"])
+    total_call = max(df.call_oi.sum(), 1)
+    total_put = max(df.put_oi.sum(), 1)
+    pcr = total_put / total_call
+    d_call = df.call_oi_change.sum() if "call_oi_change" in df else 0
+    d_put = df.put_oi_change.sum() if "put_oi_change" in df else 0
+    pcr_change = (d_put / d_call) if d_call else 1.0
+    atm_idx = (df.strike - spot).abs().idxmin()
+    atm_row = df.loc[atm_idx]
+    atm = float(atm_row.strike)
+    straddle = float(atm_row.call_ltp + atm_row.put_ltp)
+    iv_skew = float(atm_row.put_iv - atm_row.call_iv) if "call_iv" in df else 0.0
+    call_wall = float(df.nlargest(min(3, len(df)), "call_oi").strike.mean())
+    put_wall = float(df.nlargest(min(3, len(df)), "put_oi").strike.mean())
+    wall_asym = (put_wall - call_wall) / max(spot, 1)
+    return {
+        "spot": spot, "atm": atm, "pcr": pcr, "pcr_change": pcr_change,
+        "iv_skew": iv_skew, "wall_asymmetry": wall_asym,
+        "straddle_bps": straddle / max(spot, 1) * 1e4,
+        "call_wall": call_wall, "put_wall": put_wall, "straddle": straddle,
+    }
+
+
+class CVDEngine:
+    def __init__(self):
+        self.trades = deque(maxlen=5000)
+        self.cvd = 0.0
+        self._prev_px = 0.0
+
+    def on_tick(self, px, qty, bid, ask, ts):
+        if ask and px >= ask:
+            side = 1
+        elif bid and px <= bid:
+            side = -1
+        elif self._prev_px:
+            side = 1 if px > self._prev_px else (-1 if px < self._prev_px else 0)
+        else:
+            side = 0
+        self.trades.append({"ts": ts, "qty": qty, "side": side})
+        self.cvd += side * qty
+        self._prev_px = px
+        cutoff = ts - 60
+        buy = sum(t["qty"] for t in self.trades if t["ts"] >= cutoff and t["side"] == 1)
+        sell = sum(t["qty"] for t in self.trades if t["ts"] >= cutoff and t["side"] == -1)
+        delta = buy - sell
+        tot = buy + sell + 1e-9
+        return {"cvd_slope": delta / 60.0, "delta_ratio": delta / tot}
+
+
+class OnlineLearner:
+    def __init__(self, min_samples=30):
+        self.min_samples = min_samples
+        self.n = 0
+        self._fitted = False
+        self._clf = None
+        self._scaler = None
+        self._path = LOG_DIR / "online_model.pkl"
+        self._load()
+
+    def _ensure_init(self):
+        if self._clf is None:
+            from sklearn.linear_model import SGDClassifier
+            from sklearn.preprocessing import StandardScaler
+            self._clf = SGDClassifier(loss="log_loss", learning_rate="adaptive",
+                                      eta0=0.05, alpha=1e-4, random_state=7)
+            self._scaler = StandardScaler()
+
+    def _vec(self, feats):
+        return np.array([feats.get(k, 0.0) for k in FEATURES], dtype=float).reshape(1, -1)
+
+    def update(self, feats, label):
+        self._ensure_init()
+        x = self._vec(feats)
+        self._scaler.partial_fit(x)
+        try:
+            self._clf.partial_fit(self._scaler.transform(x), [label], classes=np.array([0, 1]))
+            self._fitted = True
+        except Exception:
+            return
+        self.n += 1
+        if self.n % 20 == 0:
+            self._save()
+
+    def prob_up(self, feats):
+        if not self.is_ready():
+            return 0.5
+        x = self._scaler.transform(self._vec(feats))
+        try:
+            return float(self._clf.predict_proba(x)[0, 1])
+        except Exception:
+            return 0.5
+
+    def is_ready(self):
+        return self._fitted and self.n >= self.min_samples
+
+    def _save(self):
+        try:
+            with open(self._path, "wb") as f:
+                pickle.dump({"clf": self._clf, "scaler": self._scaler,
+                             "n": self.n, "fitted": self._fitted}, f)
+        except Exception:
+            pass
+
+    def _load(self):
+        if not self._path.exists():
+            return
+        try:
+            with open(self._path, "rb") as f:
+                d = pickle.load(f)
+            self._clf = d["clf"]; self._scaler = d["scaler"]
+            self.n = d["n"]; self._fitted = d["fitted"]
+        except Exception:
+            pass
+
+
+def classify_regime(vix, cfg):
+    r = cfg["regime"]
+    if vix < r["vix_calm_max"]:
+        return "CALM", r["size_calm"], "Trend mode. Full size."
+    if vix < r["vix_panic_min"]:
+        return "NORMAL", r["size_normal"], "Selective. 75% size."
+    return "PANIC", r["size_panic"], "Cut exposure."
+
+
+OPTION_WEIGHTS = {"pcr": 0.35, "pcr_change": 0.20, "iv_skew": -0.20,
+                  "wall_asymmetry": 0.20, "straddle_bps": -0.05}
+OPTION_SCALES = {"pcr": 0.50, "pcr_change": 0.50, "iv_skew": 5.0,
+                 "wall_asymmetry": 0.02, "straddle_bps": 100.0}
+DEPTH_WEIGHTS = {"ofi": 0.40, "microprice_drift": 0.20, "weighted_obi": 0.15,
+                 "obi": 0.15, "queue_imb": 0.10}
+DEPTH_SCALES = {"ofi": 250.0, "microprice_drift": 3.0, "weighted_obi": 1.0,
+                "obi": 1.0, "queue_imb": 1.0}
+CVD_WEIGHTS = {"cvd_slope": 0.60, "delta_ratio": 0.40}
+CVD_SCALES = {"cvd_slope": 50.0, "delta_ratio": 1.0}
+
+
+def _score(feats, weights, scales):
+    s = 0.0
+    for k, w in weights.items():
+        v = feats.get(k, 0.0)
+        s += w * float(np.tanh(v / scales.get(k, 1.0)))
+    return float(np.clip(s, -1, 1))
+
+
+class NiftyAgent:
+    def __init__(self, config_path=CONFIG_PATH):
+        self.cfg = load_config(config_path)
+        self.learner = OnlineLearner(self.cfg["agent"].get("online_min_samples", 30))
+        self.depth_hist = deque(maxlen=120)
+        self.cvd = CVDEngine()
+        self.last_option_feats = None
+        self.last_option_ts = 0.0
+        self.last_depth_feats = {"obi": 0.0, "weighted_obi": 0.0, "ofi": 0.0,
+                                 "microprice_drift": 0.0, "queue_imb": 0.0}
+        self.last_cvd_feats = {"cvd_slope": 0.0, "delta_ratio": 0.0}
+        self.vix = 15.0
+        self._pending = None
+
+    def on_option_chain(self, df, spot=None, vix=None):
+        feats = option_features(df, spot=spot)
+        self.last_option_feats = feats
+        self.last_option_ts = time.time()
+        if vix is not None:
+            self.vix = vix
+
+    def predict(self):
+        if self.last_option_feats is None:
+            raise RuntimeError("Call on_option_chain() before predict()")
+        opt_score = _score(self.last_option_feats, OPTION_WEIGHTS, OPTION_SCALES)
+        depth_score = _score(self.last_depth_feats, DEPTH_WEIGHTS, DEPTH_SCALES)
+        cvd_score = _score(self.last_cvd_feats, CVD_WEIGHTS, CVD_SCALES)
+        has_depth = any(v != 0.0 for v in self.last_depth_feats.values())
+        has_cvd = any(v != 0.0 for v in self.last_cvd_feats.values())
+        wd = self.cfg["agent"]["weight_depth"] if has_depth else 0.0
+        wc = self.cfg["agent"]["weight_cvd"] if has_cvd else 0.0
+        wo = self.cfg["agent"]["weight_options"]
+        total_w = wd + wc + wo
+        blended = (wd * depth_score + wc * cvd_score + wo * opt_score) / total_w
+        regime, size_mult, note = classify_regime(self.vix, self.cfg)
+        if regime == "PANIC":
+            blended *= 0.5
+        combined_feats = {**self.last_option_feats, **self.last_depth_feats, **self.last_cvd_feats}
+        ml_prob = self.learner.prob_up(combined_feats)
+        if self.learner.is_ready():
+            blended = 0.70 * blended + 0.30 * (ml_prob - 0.5) * 2
+        blended = float(np.clip(blended, -1, 1))
+        th = self.cfg["agent"]["direction_threshold"]
+        if blended > th:
+            direction = "BULLISH"
+        elif blended < -th:
+            direction = "BEARISH"
+        else:
+            direction = "FLAT"
+        confidence = round(min(abs(blended) * 100, 100), 1)
+        spot = self.last_option_feats["spot"]
+        straddle = self.last_option_feats.get("straddle", 50)
+        exp_pts = round(abs(blended) * max(straddle * 0.15, 5.0), 1)
+        atr_proxy = max(straddle * 0.15, 8.0)
+        rk = self.cfg["risk"]
+        if direction == "BULLISH":
+            stop = round(spot - atr_proxy * rk["stop_atr_mult"], 1)
+            target = round(spot + atr_proxy * rk["target_atr_mult"], 1)
+        elif direction == "BEARISH":
+            stop = round(spot + atr_proxy * rk["stop_atr_mult"], 1)
+            target = round(spot - atr_proxy * rk["target_atr_mult"], 1)
+        else:
+            stop = target = 0.0
+        if direction == "FLAT" or confidence < self.cfg["agent"]["min_confidence"]:
+            action = "STAND ASIDE"
+        elif regime == "PANIC":
+            action = "STAND ASIDE (panic regime)"
+        else:
+            action = "BUY NIFTY FUT" if direction == "BULLISH" else "SELL NIFTY FUT"
+        pred = Prediction(
+            ts=time.time(), spot=spot, direction=direction,
+            score=round(blended, 3), confidence=confidence,
+            expected_points=exp_pts, regime=regime, size_mult=size_mult,
+            action=action, stop_loss=stop, take_profit=target,
+            contributions={"options": round(opt_score, 3), "depth": round(depth_score, 3),
+                           "cvd": round(cvd_score, 3), "ml_prob": round(ml_prob, 3)},
+            features=combined_feats,
+        )
+        self._pending = {"ts": pred.ts, "spot": spot, "feats": combined_feats}
+        return pred
+
+    def label_previous(self, next_spot):
+        if not self._pending:
+            return
+        realized_bps = (next_spot - self._pending["spot"]) / self._pending["spot"] * 1e4
+        label = 1 if realized_bps > 0 else 0
+        self.learner.update(self._pending["feats"], label)
+        self._pending = None

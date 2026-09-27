@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+logs/
+test.csv
+patch.py
+patch_cloud.py
+patch_fp.py
+patch_spot.py
+online_model.pkl
+*.log

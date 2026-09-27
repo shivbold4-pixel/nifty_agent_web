@@ -1,0 +1,20 @@
+# Nifty Agent Configuration
+agent:
+  weight_depth: 0.35
+  weight_cvd: 0.30
+  weight_options: 0.35
+  direction_threshold: 0.35
+  min_confidence: 35.0
+  online_min_samples: 30
+
+regime:
+  vix_calm_max: 13.0
+  vix_panic_min: 20.0
+  size_calm: 1.00
+  size_normal: 0.75
+  size_panic: 0.25
+
+risk:
+  stop_atr_mult: 1.5
+  target_atr_mult: 1.0
+  max_spread_pts: 2.0
