@@ -1,10 +1,9 @@
-# Nifty Agent - Mobile Web UI
+# Nifty Agent - Mobile Web UI (v2 with all fixes)
 import time
 import json
 import io
 from pathlib import Path
-from datetime import datetime
-from urllib.parse import quote
+from datetime import datetime, timezone, timedelta
 
 import streamlit as st
 import pandas as pd
@@ -13,6 +12,16 @@ import plotly.graph_objects as go
 from agent import NiftyAgent
 from parser_helper import parse_option_chain
 
+# ---------- IST timezone ----------
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def now_ist():
+    return datetime.now(IST)
+
+def ts_ist(ts_unix):
+    return datetime.fromtimestamp(ts_unix, tz=IST)
+
+# ---------- Page config ----------
 st.set_page_config(page_title="Nifty Agent", page_icon="N", layout="centered",
                    initial_sidebar_state="collapsed")
 
@@ -72,6 +81,7 @@ if "agent" not in st.session_state:
     st.session_state.last_pred = None
     st.session_state.uploaded_seen = set()
     st.session_state.df = None
+    st.session_state._last_pred_ts = 0.0
 
 agent = st.session_state.agent
 
@@ -92,7 +102,6 @@ if uploaded is not None:
     fingerprint = f"{uploaded.name}:{uploaded.size}:{spot_override}"
     if fingerprint not in st.session_state.uploaded_seen:
         with st.spinner("Analyzing..."):
-            # Read file bytes once
             try:
                 file_bytes = uploaded.read()
             except Exception as e:
@@ -103,7 +112,6 @@ if uploaded is not None:
                 st.error("File is empty.")
                 st.stop()
 
-            # Parse
             try:
                 df = parse_option_chain(io.BytesIO(file_bytes))
             except Exception as e:
@@ -142,42 +150,54 @@ if uploaded is not None:
             st.session_state.uploaded_seen.add(fingerprint)
             st.session_state.df = df
 
-            st.session_state.history.append({
-                "time": datetime.fromtimestamp(pred.ts).strftime("%H:%M:%S"),
-                "spot": round(pred.spot, 1),
-                "direction": pred.direction,
-                "score": pred.score,
-                "confidence": pred.confidence,
-                "regime": pred.regime,
-                "action": pred.action,
-            })
+            # ---- Guard against duplicate log entries ----
+            # Only log if this is genuinely a new prediction (not a Streamlit rerun)
+            is_new_prediction = abs(pred.ts - st.session_state._last_pred_ts) > 1.0
 
-            # Log
-            try:
-                log_path = Path("logs") / f"predictions_{datetime.now():%Y%m%d}.jsonl"
-                log_path.parent.mkdir(exist_ok=True)
-                with open(log_path, "a") as f:
-                    f.write(json.dumps({
-                        "ts": pred.ts, "spot": pred.spot,
-                        "direction": pred.direction, "score": pred.score,
-                        "confidence": pred.confidence, "regime": pred.regime,
-                        "action": pred.action,
-                        "stop": pred.stop_loss, "target": pred.take_profit,
-                        "contributions": pred.contributions,
-                    }) + "\n")
-            except Exception:
-                pass
+            if is_new_prediction:
+                st.session_state._last_pred_ts = pred.ts
+                st.session_state.history.append({
+                    "time": ts_ist(pred.ts).strftime("%H:%M:%S"),
+                    "spot": round(pred.spot, 1),
+                    "direction": pred.direction,
+                    "score": pred.score,
+                    "confidence": pred.confidence,
+                    "regime": pred.regime,
+                    "action": pred.action,
+                })
 
-# ---- Render ----
+                # Log to disk
+                try:
+                    log_path = Path("logs") / f"predictions_{now_ist():%Y%m%d}.jsonl"
+                    log_path.parent.mkdir(exist_ok=True)
+                    with open(log_path, "a") as f:
+                        f.write(json.dumps({
+                            "ts": pred.ts,
+                            "ts_ist": ts_ist(pred.ts).strftime("%Y-%m-%d %H:%M:%S"),
+                            "spot": pred.spot,
+                            "direction": pred.direction,
+                            "score": pred.score,
+                            "confidence": pred.confidence,
+                            "regime": pred.regime,
+                            "action": pred.action,
+                            "stop": pred.stop_loss,
+                            "target": pred.take_profit,
+                            "contributions": pred.contributions,
+                        }) + "\n")
+                except Exception:
+                    pass
+
+# ---------- Render prediction ----------
 pred = st.session_state.last_pred
 if pred is not None:
     dir_class = {"BULLISH": "hero-bull", "BEARISH": "hero-bear"}.get(pred.direction, "hero-flat")
-    dir_emoji = {"BULLISH": "BULL", "BEARISH": "BEAR"}.get(pred.direction, "FLAT")
+
     st.markdown(f"""<div class="hero-card {dir_class}">
-        <p class="hero-direction">{dir_emoji} {pred.direction}</p>
+        <p class="hero-direction">{pred.direction}</p>
         <p class="hero-spot">Spot {pred.spot:.1f}</p>
         <p class="hero-sub">Score {pred.score:+.2f} &middot; {pred.regime} regime</p>
     </div>""", unsafe_allow_html=True)
+
     st.markdown(f"**Confidence: {pred.confidence}%**")
     st.progress(min(int(pred.confidence), 100))
 
@@ -191,8 +211,8 @@ if pred is not None:
         st.markdown(f"""<div class="{plan_class}">
             <div class="plan-title">{pred.action}</div>
             <div class="plan-row"><span class="plan-label">Entry</span><span class="plan-value">{pred.spot:.1f}</span></div>
-            <div class="plan-row"><span class="plan-label">Stop loss</span><span class="plan-value" style="color:#FF1744;">{pred.stop_loss}</span></div>
-            <div class="plan-row"><span class="plan-label">Target</span><span class="plan-value" style="color:#00C853;">{pred.take_profit}</span></div>
+            <div class="plan-row"><span class="plan-label">Stop loss</span><span class="plan-value" style="color:#D32F2F;">{pred.stop_loss}</span></div>
+            <div class="plan-row"><span class="plan-label">Target</span><span class="plan-value" style="color:#00A043;">{pred.take_profit}</span></div>
             <div class="plan-row"><span class="plan-label">Expected move</span><span class="plan-value">+/-{pred.expected_points} pts</span></div>
             <div class="plan-row"><span class="plan-label">Size multiplier</span><span class="plan-value">x{pred.size_mult}</span></div>
         </div>""", unsafe_allow_html=True)
@@ -206,10 +226,10 @@ if pred is not None:
         contrib = pred.contributions
         cc = pd.DataFrame({"Layer": list(contrib.keys()), "Score": list(contrib.values())})
         fig = go.Figure(go.Bar(x=cc["Score"], y=cc["Layer"], orientation="h",
-                               marker=dict(color=["#00C853" if v > 0.05 else "#FF1744" if v < -0.05 else "#666" for v in cc["Score"]])))
+                               marker=dict(color=["#00A043" if v > 0.05 else "#D32F2F" if v < -0.05 else "#999" for v in cc["Score"]])))
         fig.update_layout(height=200, margin=dict(l=0, r=0, t=10, b=0),
                           xaxis=dict(range=[-1, 1], showgrid=False), yaxis=dict(showgrid=False),
-                          plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#FAFAFA"))
+                          plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#1A1A1A"))
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
     with st.expander("Parsed data preview (first 5 rows)", expanded=False):
@@ -221,10 +241,10 @@ if pred is not None:
 
 if st.session_state.history:
     st.markdown("---")
-    st.markdown("### Session History")
+    st.markdown("### Session History (IST)")
     hist_df = pd.DataFrame(st.session_state.history[::-1])
     st.dataframe(hist_df[["time", "spot", "direction", "confidence", "action"]],
                  use_container_width=True, hide_index=True)
 
 st.markdown("---")
-st.markdown(f"<p style='text-align:center; opacity:0.4; font-size:0.75rem;'>Nifty Agent - {len(st.session_state.history)} predictions</p>", unsafe_allow_html=True)
+st.markdown(f"<p style='text-align:center; opacity:0.4; font-size:0.75rem;'>Nifty Agent - {len(st.session_state.history)} predictions &middot; {now_ist().strftime('%Y-%m-%d %H:%M IST')}</p>", unsafe_allow_html=True)
