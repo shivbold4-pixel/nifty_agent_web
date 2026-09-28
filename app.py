@@ -23,21 +23,21 @@ st.markdown("""
 st.markdown("""
 <style>
     .block-container { padding: 1rem !important; max-width: 720px !important; }
-    .hero-card { background: #1A1D24; border-radius: 16px; padding: 24px 20px; text-align: center; margin-bottom: 16px; border: 1px solid #2A2D34; }
-    .hero-bull { border: 2px solid #00C853; box-shadow: 0 0 24px rgba(0,200,83,0.15); }
-    .hero-bear { border: 2px solid #FF1744; box-shadow: 0 0 24px rgba(255,23,68,0.15); }
-    .hero-flat { border: 2px solid #FFB300; box-shadow: 0 0 24px rgba(255,179,0,0.15); }
-    .hero-direction { font-size: 2.2rem; font-weight: 800; margin: 0; line-height: 1.1; }
-    .hero-sub { font-size: 0.9rem; opacity: 0.7; margin-top: 8px; }
-    .hero-spot { font-size: 1.3rem; font-weight: 600; opacity: 0.9; margin-top: 4px; }
-    .plan-card { background: #1A1D24; border-radius: 12px; padding: 16px; margin: 12px 0; border-left: 4px solid #00C853; }
-    .plan-card.bear { border-left-color: #FF1744; }
-    .plan-card.flat { border-left-color: #FFB300; }
-    .plan-title { font-weight: 700; font-size: 1.05rem; margin-bottom: 10px; }
-    .plan-row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 0.92rem; border-bottom: 1px solid #2A2D34; }
+    .hero-card { background: #FFFFFF; border-radius: 16px; padding: 24px 20px; text-align: center; margin-bottom: 16px; border: 2px solid #E0E0E0; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+    .hero-bull { border: 2px solid #00A043; box-shadow: 0 0 24px rgba(0,160,67,0.20); }
+    .hero-bear { border: 2px solid #D32F2F; box-shadow: 0 0 24px rgba(211,47,47,0.20); }
+    .hero-flat { border: 2px solid #F57C00; box-shadow: 0 0 24px rgba(245,124,0,0.20); }
+    .hero-direction { font-size: 2.2rem; font-weight: 800; margin: 0; line-height: 1.1; color: #1A1A1A; }
+    .hero-sub { font-size: 0.9rem; opacity: 0.7; margin-top: 8px; color: #666; }
+    .hero-spot { font-size: 1.3rem; font-weight: 600; opacity: 0.9; margin-top: 4px; color: #1A1A1A; }
+    .plan-card { background: #F9F9F9; border-radius: 12px; padding: 16px; margin: 12px 0; border-left: 4px solid #00A043; }
+    .plan-card.bear { border-left-color: #D32F2F; }
+    .plan-card.flat { border-left-color: #F57C00; }
+    .plan-title { font-weight: 700; font-size: 1.05rem; margin-bottom: 10px; color: #1A1A1A; }
+    .plan-row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 0.92rem; border-bottom: 1px solid #E0E0E0; }
     .plan-row:last-child { border-bottom: none; }
-    .plan-label { opacity: 0.6; }
-    .plan-value { font-weight: 600; }
+    .plan-label { opacity: 0.7; color: #555; }
+    .plan-value { font-weight: 600; color: #1A1A1A; }
     #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
