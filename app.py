@@ -76,7 +76,12 @@ if not check_password():
     st.stop()
 
 if "agent" not in st.session_state:
-    st.session_state.agent = NiftyAgent()
+    try:
+        sb_url = st.secrets.get("SUPABASE_URL", None)
+        sb_key = st.secrets.get("SUPABASE_KEY", None)
+    except Exception:
+        sb_url, sb_key = None, None
+    st.session_state.agent = NiftyAgent(supabase_url=sb_url, supabase_key=sb_key)
     st.session_state.history = []
     st.session_state.last_pred = None
     st.session_state.uploaded_seen = set()
@@ -247,4 +252,19 @@ if st.session_state.history:
                  use_container_width=True, hide_index=True)
 
 st.markdown("---")
+if st.button("Save Model to Cloud"):
+    if agent.cloud is not None:
+        agent.force_save_model()
+        st.success("Model saved to Supabase.")
+    else:
+        st.warning("Cloud not configured.")
+
+if st.button("Retrain from History"):
+    if agent.cloud is not None:
+        with st.spinner("Retraining..."):
+            result = agent.retrain()
+        st.json(result)
+    else:
+        st.warning("Cloud not configured.")
+
 st.markdown(f"<p style='text-align:center; opacity:0.4; font-size:0.75rem;'>Nifty Agent - {len(st.session_state.history)} predictions &middot; {now_ist().strftime('%Y-%m-%d %H:%M IST')}</p>", unsafe_allow_html=True)

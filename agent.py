@@ -1,30 +1,21 @@
-﻿# ============================================================
-# NIFTY AGENT - Core Engine
-# ============================================================
+"""Nifty Agent with cloud-persistent learning."""
 import time
 import numpy as np
 import pandas as pd
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-import pickle
 import yaml
 
+from cloud_store import CloudStore
+from cloud_learner import CloudLearner
+
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
-LOG_DIR = Path(__file__).parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
 
 
 def load_config(path=CONFIG_PATH):
     with open(path) as f:
         return yaml.safe_load(f)
-
-
-FEATURES = [
-    "pcr", "pcr_change", "iv_skew", "wall_asymmetry", "straddle_bps",
-    "obi", "weighted_obi", "ofi", "microprice_drift", "queue_imb",
-    "cvd_slope", "delta_ratio",
-]
 
 
 @dataclass
@@ -94,14 +85,11 @@ class CVDEngine:
         self._prev_px = 0.0
 
     def on_tick(self, px, qty, bid, ask, ts):
-        if ask and px >= ask:
-            side = 1
-        elif bid and px <= bid:
-            side = -1
+        if ask and px >= ask: side = 1
+        elif bid and px <= bid: side = -1
         elif self._prev_px:
             side = 1 if px > self._prev_px else (-1 if px < self._prev_px else 0)
-        else:
-            side = 0
+        else: side = 0
         self.trades.append({"ts": ts, "qty": qty, "side": side})
         self.cvd += side * qty
         self._prev_px = px
@@ -113,78 +101,12 @@ class CVDEngine:
         return {"cvd_slope": delta / 60.0, "delta_ratio": delta / tot}
 
 
-class OnlineLearner:
-    def __init__(self, min_samples=30):
-        self.min_samples = min_samples
-        self.n = 0
-        self._fitted = False
-        self._clf = None
-        self._scaler = None
-        self._path = LOG_DIR / "online_model.pkl"
-        self._load()
-
-    def _ensure_init(self):
-        if self._clf is None:
-            from sklearn.linear_model import SGDClassifier
-            from sklearn.preprocessing import StandardScaler
-            self._clf = SGDClassifier(loss="log_loss", learning_rate="adaptive",
-                                      eta0=0.05, alpha=1e-4, random_state=7)
-            self._scaler = StandardScaler()
-
-    def _vec(self, feats):
-        return np.array([feats.get(k, 0.0) for k in FEATURES], dtype=float).reshape(1, -1)
-
-    def update(self, feats, label):
-        self._ensure_init()
-        x = self._vec(feats)
-        self._scaler.partial_fit(x)
-        try:
-            self._clf.partial_fit(self._scaler.transform(x), [label], classes=np.array([0, 1]))
-            self._fitted = True
-        except Exception:
-            return
-        self.n += 1
-        if self.n % 20 == 0:
-            self._save()
-
-    def prob_up(self, feats):
-        if not self.is_ready():
-            return 0.5
-        x = self._scaler.transform(self._vec(feats))
-        try:
-            return float(self._clf.predict_proba(x)[0, 1])
-        except Exception:
-            return 0.5
-
-    def is_ready(self):
-        return self._fitted and self.n >= self.min_samples
-
-    def _save(self):
-        try:
-            with open(self._path, "wb") as f:
-                pickle.dump({"clf": self._clf, "scaler": self._scaler,
-                             "n": self.n, "fitted": self._fitted}, f)
-        except Exception:
-            pass
-
-    def _load(self):
-        if not self._path.exists():
-            return
-        try:
-            with open(self._path, "rb") as f:
-                d = pickle.load(f)
-            self._clf = d["clf"]; self._scaler = d["scaler"]
-            self.n = d["n"]; self._fitted = d["fitted"]
-        except Exception:
-            pass
-
-
 def classify_regime(vix, cfg):
     r = cfg["regime"]
     if vix < r["vix_calm_max"]:
-        return "CALM", r["size_calm"], "Trend mode. Full size."
+        return "CALM", r["size_calm"], "Trend mode."
     if vix < r["vix_panic_min"]:
-        return "NORMAL", r["size_normal"], "Selective. 75% size."
+        return "NORMAL", r["size_normal"], "Selective."
     return "PANIC", r["size_panic"], "Cut exposure."
 
 
@@ -209,9 +131,23 @@ def _score(feats, weights, scales):
 
 
 class NiftyAgent:
-    def __init__(self, config_path=CONFIG_PATH):
+    def __init__(self, config_path=CONFIG_PATH, supabase_url=None, supabase_key=None):
         self.cfg = load_config(config_path)
-        self.learner = OnlineLearner(self.cfg["agent"].get("online_min_samples", 30))
+
+        # Cloud persistence
+        self.cloud = None
+        self.learner = None
+        if supabase_url and supabase_key:
+            try:
+                self.cloud = CloudStore(supabase_url, supabase_key)
+                self.learner = CloudLearner(
+                    self.cloud,
+                    min_samples=self.cfg["agent"].get("online_min_samples", 30),
+                )
+                print(f"[agent] Cloud connected. History: {self.cloud.count_predictions()} predictions")
+            except Exception as e:
+                print(f"[agent] Cloud init failed: {e}")
+
         self.depth_hist = deque(maxlen=120)
         self.cvd = CVDEngine()
         self.last_option_feats = None
@@ -235,32 +171,40 @@ class NiftyAgent:
         opt_score = _score(self.last_option_feats, OPTION_WEIGHTS, OPTION_SCALES)
         depth_score = _score(self.last_depth_feats, DEPTH_WEIGHTS, DEPTH_SCALES)
         cvd_score = _score(self.last_cvd_feats, CVD_WEIGHTS, CVD_SCALES)
+
         has_depth = any(v != 0.0 for v in self.last_depth_feats.values())
         has_cvd = any(v != 0.0 for v in self.last_cvd_feats.values())
+
         wd = self.cfg["agent"]["weight_depth"] if has_depth else 0.0
         wc = self.cfg["agent"]["weight_cvd"] if has_cvd else 0.0
         wo = self.cfg["agent"]["weight_options"]
         total_w = wd + wc + wo
         blended = (wd * depth_score + wc * cvd_score + wo * opt_score) / total_w
+
         regime, size_mult, note = classify_regime(self.vix, self.cfg)
         if regime == "PANIC":
             blended *= 0.5
+
         combined_feats = {**self.last_option_feats, **self.last_depth_feats, **self.last_cvd_feats}
-        ml_prob = self.learner.prob_up(combined_feats)
-        if self.learner.is_ready():
-            blended = 0.70 * blended + 0.30 * (ml_prob - 0.5) * 2
+
+        ml_prob = 0.5
+        if self.learner is not None:
+            ml_prob = self.learner.prob_up(combined_feats)
+            if self.learner.is_ready():
+                blended = 0.70 * blended + 0.30 * (ml_prob - 0.5) * 2
+
         blended = float(np.clip(blended, -1, 1))
+
         th = self.cfg["agent"]["direction_threshold"]
-        if blended > th:
-            direction = "BULLISH"
-        elif blended < -th:
-            direction = "BEARISH"
-        else:
-            direction = "FLAT"
+        if blended > th: direction = "BULLISH"
+        elif blended < -th: direction = "BEARISH"
+        else: direction = "FLAT"
+
         confidence = round(min(abs(blended) * 100, 100), 1)
         spot = self.last_option_feats["spot"]
         straddle = self.last_option_feats.get("straddle", 50)
         exp_pts = round(abs(blended) * max(straddle * 0.15, 5.0), 1)
+
         atr_proxy = max(straddle * 0.15, 8.0)
         rk = self.cfg["risk"]
         if direction == "BULLISH":
@@ -271,12 +215,14 @@ class NiftyAgent:
             target = round(spot - atr_proxy * rk["target_atr_mult"], 1)
         else:
             stop = target = 0.0
+
         if direction == "FLAT" or confidence < self.cfg["agent"]["min_confidence"]:
             action = "STAND ASIDE"
         elif regime == "PANIC":
             action = "STAND ASIDE (panic regime)"
         else:
             action = "BUY NIFTY FUT" if direction == "BULLISH" else "SELL NIFTY FUT"
+
         pred = Prediction(
             ts=time.time(), spot=spot, direction=direction,
             score=round(blended, 3), confidence=confidence,
@@ -286,6 +232,18 @@ class NiftyAgent:
                            "cvd": round(cvd_score, 3), "ml_prob": round(ml_prob, 3)},
             features=combined_feats,
         )
+
+        # Save prediction to cloud
+        if self.cloud is not None:
+            try:
+                self.cloud.save_prediction({
+                    "ts": pred.ts, "spot": pred.spot, "direction": pred.direction,
+                    "score": pred.score, "confidence": pred.confidence,
+                    "regime": pred.regime, "action": pred.action,
+                }, combined_feats)
+            except Exception as e:
+                print(f"[agent] cloud save failed: {e}")
+
         self._pending = {"ts": pred.ts, "spot": spot, "feats": combined_feats}
         return pred
 
@@ -294,5 +252,25 @@ class NiftyAgent:
             return
         realized_bps = (next_spot - self._pending["spot"]) / self._pending["spot"] * 1e4
         label = 1 if realized_bps > 0 else 0
-        self.learner.update(self._pending["feats"], label)
+
+        # Update local online model
+        if self.learner is not None:
+            self.learner.update(self._pending["feats"], label)
+
+        # Update cloud outcome
+        if self.cloud is not None:
+            try:
+                self.cloud.update_outcome(self._pending["ts"], realized_bps, label)
+            except Exception as e:
+                print(f"[agent] outcome update failed: {e}")
+
         self._pending = None
+
+    def force_save_model(self):
+        if self.learner is not None:
+            self.learner.force_save()
+
+    def retrain(self):
+        if self.learner is not None:
+            return self.learner.retrain_from_history()
+        return {"status": "no_learner"}
