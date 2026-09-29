@@ -187,10 +187,28 @@ class NiftyAgent:
         has_cvd = any(v != 0.0 for v in self.last_cvd_feats.values())
 
         wd = self.cfg["agent"]["weight_depth"] if has_depth else 0.0
+
+        # ==========================================
+        # UPGRADE 5: Volume Profile scoring
+        # ==========================================
+        vp_feats = self.last_option_feats.get("_vp_feats", {})
+        gex_feats = self.last_option_feats.get("_gex_feats", {})
+        vp_score = 0.0
+        if vp_feats and vp_feats.get("vah") is not None:
+            try:
+                vp_pos = float(vp_feats.get("vp_position", 0.5))
+                vp_pos_centered = float(np.clip((vp_pos - 0.5) * 2, -1, 1))
+                poc_dist = float(vp_feats.get("vp_distance_poc", 0.0))
+                poc_signal = -float(np.tanh(poc_dist / 0.01))
+                vp_score = float(np.clip(0.6 * vp_pos_centered + 0.4 * poc_signal, -1, 1))
+            except Exception as _e:
+                print(f"[agent] vp_score error: {_e}")
+                vp_score = 0.0
         wc = self.cfg["agent"]["weight_cvd"] if has_cvd else 0.0
         wo = self.cfg["agent"]["weight_options"]
-        total_w = wd + wc + wo
-        blended = (wd * depth_score + wc * cvd_score + wo * opt_score) / total_w
+        wvp = 0.15  # Volume Profile weight
+        total_w = wd + wc + wo + wvp
+        blended = (wd * depth_score + wc * cvd_score + wo * opt_score + wvp * vp_score) / total_w
 
         regime, size_mult, note = classify_regime(self.vix, self.cfg)
         if regime == "PANIC":
@@ -203,6 +221,23 @@ class NiftyAgent:
             ml_prob = self.learner.prob_up(combined_feats)
             if self.learner.is_ready():
                 blended = 0.70 * blended + 0.30 * (ml_prob - 0.5) * 2
+
+        # ==========================================
+        # UPGRADE 5: GEX regime confidence modifier
+        # ==========================================
+        gex_norm = 0.0
+        gex_regime_label = "NEUTRAL"
+        if gex_feats:
+            try:
+                gex_norm = float(gex_feats.get("gex_normalized", 0.0))
+                gex_regime_label = gex_feats.get("gex_regime", "NEUTRAL")
+            except Exception:
+                gex_norm = 0.0
+
+        if gex_norm < -0.2:
+            blended *= 1.15  # trending regime ? amplify
+        elif gex_norm > 0.2:
+            blended *= 0.85  # mean-reverting regime ? dampen
 
         if np.isnan(blended):
             blended = 0.0
@@ -242,7 +277,8 @@ class NiftyAgent:
             expected_points=exp_pts, regime=regime, size_mult=size_mult,
             action=action, stop_loss=stop, take_profit=target,
             contributions={"options": round(opt_score, 3), "depth": round(depth_score, 3),
-                           "cvd": round(cvd_score, 3), "ml_prob": round(ml_prob, 3)},
+                           "cvd": round(cvd_score, 3), "vp_score": round(vp_score, 3),
+                           "gex_norm": round(gex_norm, 3), "ml_prob": round(ml_prob, 3)},
             features=combined_feats,
         )
 
