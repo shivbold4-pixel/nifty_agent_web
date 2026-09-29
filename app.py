@@ -95,6 +95,7 @@ st.markdown("<h1 style='text-align:center; margin-bottom:0; font-size:1.6rem;'>N
             "Upload option chain to get next-minute bias</p>", unsafe_allow_html=True)
 
 with st.expander("Settings", expanded=False):
+    st.info("?? Set spot BEFORE uploading the CSV")
     spot_override = st.number_input("Actual Spot Price (0 = auto-detect from ATM)",
                                      min_value=0.0, value=0.0, step=1.0)
     vix = st.slider("India VIX", 8.0, 40.0, 14.0, 0.1)
@@ -104,7 +105,7 @@ uploaded = st.file_uploader("Upload option chain", type=None,
                              help="Any CSV or Excel file. On mobile, tap Browse and select your file.")
 
 if uploaded is not None:
-    fingerprint = f"{uploaded.name}:{uploaded.size}:{spot_override}"
+    fingerprint = f"{uploaded.name}:{uploaded.size}"
     if fingerprint not in st.session_state.uploaded_seen:
         with st.spinner("Analyzing..."):
             try:
