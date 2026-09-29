@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -24,6 +25,9 @@ def ts_ist(ts_unix):
 # ---------- Page config ----------
 st.set_page_config(page_title="Nifty Agent", page_icon="N", layout="centered",
                    initial_sidebar_state="collapsed")
+
+# Auto-refresh every 60 seconds
+st_autorefresh(interval=60000, key="auto_refresh")
 
 st.markdown("""
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
