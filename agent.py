@@ -171,6 +171,14 @@ class NiftyAgent:
     def predict(self):
         if self.last_option_feats is None:
             raise RuntimeError("Call on_option_chain() before predict()")
+
+        # Sanitize NaN values in features
+        def _sanitize(d):
+            return {k: (0.0 if (v is None or (isinstance(v, float) and np.isnan(v))) else v)
+                    for k, v in d.items()}
+        self.last_option_feats = _sanitize(self.last_option_feats)
+        self.last_depth_feats = _sanitize(self.last_depth_feats)
+        self.last_cvd_feats = _sanitize(self.last_cvd_feats)
         opt_score = _score(self.last_option_feats, OPTION_WEIGHTS, OPTION_SCALES, OPTION_CENTERS)
         depth_score = _score(self.last_depth_feats, DEPTH_WEIGHTS, DEPTH_SCALES)
         cvd_score = _score(self.last_cvd_feats, CVD_WEIGHTS, CVD_SCALES)
@@ -196,6 +204,8 @@ class NiftyAgent:
             if self.learner.is_ready():
                 blended = 0.70 * blended + 0.30 * (ml_prob - 0.5) * 2
 
+        if np.isnan(blended):
+            blended = 0.0
         blended = float(np.clip(blended, -1, 1))
 
         th = self.cfg["agent"]["direction_threshold"]

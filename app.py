@@ -205,7 +205,11 @@ if pred is not None:
     </div>""", unsafe_allow_html=True)
 
     st.markdown(f"**Confidence: {pred.confidence}%**")
-    st.progress(min(int(pred.confidence), 100))
+    try:
+        conf_int = int(pred.confidence) if not (pred.confidence is None or str(pred.confidence) == "nan") else 0
+        st.progress(min(max(conf_int, 0), 100))
+    except Exception:
+        st.progress(0)
 
     plan_class = "plan-card"
     if pred.direction == "BEARISH":
