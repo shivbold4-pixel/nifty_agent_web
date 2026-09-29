@@ -94,6 +94,71 @@ st.markdown("<h1 style='text-align:center; margin-bottom:0; font-size:1.6rem;'>N
             "<p style='text-align:center; opacity:0.6; font-size:0.85rem; margin-top:4px;'>"
             "Upload option chain to get next-minute bias</p>", unsafe_allow_html=True)
 
+# ============================================================
+# AUTO-FETCH FROM SUPABASE live_data
+# ============================================================
+auto_data_used = False
+auto_ts_display = "-"
+auto_nifty = None
+auto_vix = None
+auto_chain_rows = 0
+
+try:
+    if agent.cloud is not None:
+        _latest = (agent.cloud.client.table("live_data")
+                   .select("*")
+                   .order("created_at", desc=True)
+                   .limit(1)
+                   .execute())
+        if _latest.data:
+            _row = _latest.data[0]
+            _fp = f"auto:{_row.get('created_at','')}"
+            auto_ts_display = _row.get("ts_ist", "?")
+            auto_nifty = _row.get("nifty_spot")
+            auto_vix = _row.get("india_vix")
+            _chain = _row.get("chain_json") or []
+            auto_chain_rows = len(_chain)
+
+            if _fp not in st.session_state.uploaded_seen and _chain:
+                _df_auto = pd.DataFrame(_chain)
+                for _c in _df_auto.columns:
+                    if _df_auto[_c].dtype == object:
+                        _df_auto[_c] = pd.to_numeric(
+                            _df_auto[_c].astype(str).str.replace(",", ""),
+                            errors="coerce"
+                        )
+                _df_auto = _df_auto.dropna(subset=["strike"]).reset_index(drop=True)
+                if len(_df_auto) > 0:
+                    agent.on_option_chain(_df_auto, spot=auto_nifty, vix=auto_vix)
+                    _pred = agent.predict()
+                    st.session_state.last_pred = _pred
+                    st.session_state.df = _df_auto
+                    st.session_state.uploaded_seen.add(_fp)
+                    st.session_state.last_auto_ts = auto_ts_display
+                    st.session_state.history.append({
+                        "time": now_ist().strftime("%H:%M:%S"),
+                        "spot": round(_pred.spot, 1),
+                        "direction": _pred.direction,
+                        "score": _pred.score,
+                        "confidence": _pred.confidence,
+                        "regime": _pred.regime,
+                        "action": _pred.action,
+                    })
+                    auto_data_used = True
+except Exception as _e:
+    print(f"[app] auto-fetch error: {_e}")
+
+if auto_data_used:
+    st.success(f"LIVE auto-data | Nifty {auto_nifty} | VIX {auto_vix} | "
+               f"{auto_chain_rows} strikes | fetched {auto_ts_display} IST")
+elif auto_ts_display != "-":
+    st.info(f"Cached data from {auto_ts_display} IST. "
+            f"Upload CSV to refresh, or wait for next fetcher cycle.")
+else:
+    st.warning("No auto-data yet. Run `python auto_fetcher.py` or upload CSV below.")
+
+# ============================================================
+
 with st.expander("Settings", expanded=False):
     st.info("Tip: Set spot BEFORE uploading the CSV")
     spot_override = st.number_input("Actual Spot Price (0 = auto-detect from ATM)",
