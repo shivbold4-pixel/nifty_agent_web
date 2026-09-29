@@ -112,7 +112,9 @@ def classify_regime(vix, cfg):
 
 OPTION_WEIGHTS = {"pcr": 0.35, "pcr_change": 0.20, "iv_skew": -0.20,
                   "wall_asymmetry": 0.20, "straddle_bps": -0.05}
-OPTION_SCALES = {"pcr": 0.50, "pcr_change": 0.50, "iv_skew": 5.0,
+OPTION_CENTERS = {"pcr": 1.0, "pcr_change": 1.0, "iv_skew": 0.0,
+                  "wall_asymmetry": 0.0, "straddle_bps": 80.0}
+OPTION_SCALES = {"pcr": 0.30, "pcr_change": 0.30, "iv_skew": 5.0,
                  "wall_asymmetry": 0.02, "straddle_bps": 100.0}
 DEPTH_WEIGHTS = {"ofi": 0.40, "microprice_drift": 0.20, "weighted_obi": 0.15,
                  "obi": 0.15, "queue_imb": 0.10}
@@ -122,10 +124,11 @@ CVD_WEIGHTS = {"cvd_slope": 0.60, "delta_ratio": 0.40}
 CVD_SCALES = {"cvd_slope": 50.0, "delta_ratio": 1.0}
 
 
-def _score(feats, weights, scales):
+def _score(feats, weights, scales, centers=None):
+    centers = centers or {}
     s = 0.0
     for k, w in weights.items():
-        v = feats.get(k, 0.0)
+        v = feats.get(k, 0.0) - centers.get(k, 0.0)
         s += w * float(np.tanh(v / scales.get(k, 1.0)))
     return float(np.clip(s, -1, 1))
 
@@ -168,7 +171,7 @@ class NiftyAgent:
     def predict(self):
         if self.last_option_feats is None:
             raise RuntimeError("Call on_option_chain() before predict()")
-        opt_score = _score(self.last_option_feats, OPTION_WEIGHTS, OPTION_SCALES)
+        opt_score = _score(self.last_option_feats, OPTION_WEIGHTS, OPTION_SCALES, OPTION_CENTERS)
         depth_score = _score(self.last_depth_feats, DEPTH_WEIGHTS, DEPTH_SCALES)
         cvd_score = _score(self.last_cvd_feats, CVD_WEIGHTS, CVD_SCALES)
 
