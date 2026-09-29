@@ -7,3 +7,6 @@ plotly
 pyarrow
 openpyxl
 supabase>=2.0
+nselib>=2.0
+indiaopt
+curl_cffi
