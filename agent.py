@@ -294,11 +294,10 @@ class NiftyAgent:
         # When Nifty moves sharply against the options layer's direction,
         # trust price over positioning. Forces a signal on trend reversals.
         # ============================================================
-        if mom_15m >= 0.0025 and opt_score < -0.15:
-            # Bullish reversal against bearish options
+        # 15-min override (sharp moves) or 30-min override (slower trends)
+        if (mom_15m >= 0.0015 or mom_30m >= 0.0020) and opt_score < -0.15:
             blended = max(blended, 0.40)
-        elif mom_15m <= -0.0025 and opt_score > 0.15:
-            # Bearish reversal against bullish options
+        elif (mom_15m <= -0.0015 or mom_30m <= -0.0020) and opt_score > 0.15:
             blended = min(blended, -0.40)
 
         # ==========================================
