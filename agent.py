@@ -159,6 +159,7 @@ class NiftyAgent:
                                  "microprice_drift": 0.0, "queue_imb": 0.0}
         self.last_cvd_feats = {"cvd_slope": 0.0, "delta_ratio": 0.0}
         self.vix = 15.0
+        self.recent_spots = []
         self._pending = None
 
     def on_option_chain(self, df, spot=None, vix=None):
@@ -222,6 +223,72 @@ class NiftyAgent:
             if self.learner.is_ready():
                 blended = 0.70 * blended + 0.30 * (ml_prob - 0.5) * 2
 
+        # ============================================================
+        # MULTI-TIMEFRAME MOMENTUM ENGINE
+        # Reads price across 5m / 15m / 30m windows.
+        # Overrides option signal when price moves decisively.
+        # ============================================================
+        _spot_now = self.last_option_feats["spot"]
+        _ts_now = time.time()
+        self.recent_spots.append((_ts_now, _spot_now))
+        if len(self.recent_spots) > 10:
+            self.recent_spots = self.recent_spots[-10:]
+
+        def _pct(a, b):
+            return (a - b) / b if b and b > 0 else 0.0
+
+        mom_5m = mom_15m = mom_30m = 0.0
+        if len(self.recent_spots) >= 2:
+            mom_5m = _pct(_spot_now, self.recent_spots[-2][1])
+        if len(self.recent_spots) >= 4:
+            mom_15m = _pct(_spot_now, self.recent_spots[-4][1])
+        if len(self.recent_spots) >= 7:
+            mom_30m = _pct(_spot_now, self.recent_spots[-7][1])
+
+        def _strength(pct):
+            ap = abs(pct)
+            if ap >= 0.0040: return 0.50
+            if ap >= 0.0030: return 0.40
+            if ap >= 0.0020: return 0.30
+            if ap >= 0.0010: return 0.18
+            if ap >= 0.0005: return 0.08
+            return 0.0
+
+        momentum_override = 0.0
+        if mom_15m < 0:
+            momentum_override = -_strength(mom_15m)
+        elif mom_15m > 0:
+            momentum_override = _strength(mom_15m)
+
+        # Agreement bonus: 5m and 15m agree
+        if mom_5m * mom_15m > 0 and abs(mom_5m) > 0.0010:
+            momentum_override *= 1.20
+
+        # Trend bonus: 3+ consecutive same-direction moves
+        _consecutive = 0
+        _direction = 0
+        if len(self.recent_spots) >= 4:
+            for _i in range(len(self.recent_spots) - 1, 1, -1):
+                _d = self.recent_spots[_i][1] - self.recent_spots[_i - 1][1]
+                _sgn = 1 if _d > 0 else (-1 if _d < 0 else 0)
+                if _sgn == 0:
+                    break
+                if _direction == 0:
+                    _direction = _sgn
+                    _consecutive = 1
+                elif _sgn == _direction:
+                    _consecutive += 1
+                else:
+                    break
+
+        if _consecutive >= 3:
+            momentum_override *= 1.15
+
+        # Cap at ?0.55
+        momentum_override = max(-0.55, min(0.55, momentum_override))
+
+        blended += momentum_override
+
         # ==========================================
         # UPGRADE 5: GEX regime confidence modifier
         # ==========================================
@@ -278,7 +345,9 @@ class NiftyAgent:
             action=action, stop_loss=stop, take_profit=target,
             contributions={"options": round(opt_score, 3), "depth": round(depth_score, 3),
                            "cvd": round(cvd_score, 3), "vp_score": round(vp_score, 3),
-                           "gex_norm": round(gex_norm, 3), "ml_prob": round(ml_prob, 3)},
+                           "gex_norm": round(gex_norm, 3),
+                           "momentum": round(momentum_override, 3),
+                           "ml_prob": round(ml_prob, 3)},
             features=combined_feats,
         )
 
