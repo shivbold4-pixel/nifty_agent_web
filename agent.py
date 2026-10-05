@@ -376,10 +376,10 @@ class NiftyAgent:
         base_mult = size_mult
         if vol_label == "HIGH" and vol_conf >= 60:
             base_mult *= 1.3
-            action_note = " (High vol ? size up)"
+            action_note = " (High vol - size up)"
         elif vol_label == "LOW" and vol_conf >= 60:
             base_mult *= 0.7
-            action_note = " (Low vol ? size down)"
+            action_note = " (Low vol - size down)"
         else:
             action_note = ""
 
