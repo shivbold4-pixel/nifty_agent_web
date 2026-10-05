@@ -11,3 +11,4 @@ nselib>=2.0
 indiaopt
 curl_cffi
 streamlit-autorefresh
+xgboost
