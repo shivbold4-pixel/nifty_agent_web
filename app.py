@@ -309,15 +309,15 @@ if pred is not None:
         if pred.volatility == "HIGH":
             st.error(f"? HIGH VOLATILITY ({pred.volatility_conf}%)")
         elif pred.volatility == "LOW":
-            st.success(f"?? LOW VOLATILITY ({pred.volatility_conf}%)")
+            st.success(f"LOW VOLATILITY ({pred.volatility_conf}%)")
         else:
             st.info("Volatility: Unknown")
 
     with col2:
         if not pred.can_trade:
-            st.error(f"?? {pred.risk_reason}")
+            st.error(f"BLOCKED: {pred.risk_reason}")
         else:
-            st.success("? Trading allowed")
+            st.success("Trading allowed")
 
     if not pred.can_trade:
         st.warning("**Risk limits reached ? no new trades today.**")
