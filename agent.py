@@ -9,6 +9,8 @@ import yaml
 
 from cloud_store import CloudStore
 from cloud_learner import CloudLearner
+from volatility_model import VolatilityModel
+from risk_manager import RiskManager
 
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
@@ -31,6 +33,10 @@ class Prediction:
     action: str
     stop_loss: float
     take_profit: float
+    volatility: str
+    volatility_conf: float
+    can_trade: bool
+    risk_reason: str
     contributions: dict
     features: dict
 
@@ -161,6 +167,8 @@ class NiftyAgent:
         self.vix = 15.0
         self.recent_spots = []
         self._pending = None
+        self.vol_model = VolatilityModel()
+        self.risk = RiskManager()
 
     def on_option_chain(self, df, spot=None, vix=None):
         feats = option_features(df, spot=spot)
@@ -349,16 +357,55 @@ class NiftyAgent:
         else:
             action = "BUY NIFTY FUT" if direction == "BULLISH" else "SELL NIFTY FUT"
 
+        # ==================================================
+        # VOLATILITY MODEL C inference
+        # ==================================================
+        vol_label = "UNKNOWN"
+        vol_conf = 0.0
+        try:
+            vol_label, vol_conf = self.vol_model.predict(combined_feats)
+        except Exception as _e:
+            print(f"[agent] vol error: {_e}")
+
+        # ==================================================
+        # RISK MANAGEMENT
+        # ==================================================
+        can_trade, risk_reason = self.risk.check_can_trade()
+
+        # Adjust size by volatility + risk
+        base_mult = size_mult
+        if vol_label == "HIGH" and vol_conf >= 60:
+            base_mult *= 1.3
+            action_note = " (High vol ? size up)"
+        elif vol_label == "LOW" and vol_conf >= 60:
+            base_mult *= 0.7
+            action_note = " (Low vol ? size down)"
+        else:
+            action_note = ""
+
+        base_mult = self.risk.adjust_size_mult(base_mult)
+
+        # Override action if risk says stop
+        if not can_trade:
+            action = f"HALTED ? {risk_reason}"
+        else:
+            action = action + action_note
+
         pred = Prediction(
             ts=time.time(), spot=spot, direction=direction,
             score=round(blended, 3), confidence=confidence,
             expected_points=exp_pts, regime=regime, size_mult=size_mult,
             action=action, stop_loss=stop, take_profit=target,
+            volatility=vol_label,
+            volatility_conf=vol_conf,
+            can_trade=can_trade,
+            risk_reason=risk_reason,
             contributions={"options": round(opt_score, 3), "depth": round(depth_score, 3),
                            "cvd": round(cvd_score, 3), "vp_score": round(vp_score, 3),
                            "gex_norm": round(gex_norm, 3),
                            "momentum": round(momentum_override, 3),
-                           "ml_prob": round(ml_prob, 3)},
+                           "ml_prob": round(ml_prob, 3),
+                           "vol_conf": round(vol_conf, 1)},
             features=combined_feats,
         )
 

@@ -301,6 +301,27 @@ if pred is not None:
             <div class="plan-row"><span class="plan-label">Reason</span><span class="plan-value">Low conviction or panic regime</span></div>
         </div>""", unsafe_allow_html=True)
 
+    # ==================================================
+    # VOLATILITY + RISK DISPLAY
+    # ==================================================
+    col1, col2 = st.columns(2)
+    with col1:
+        if pred.volatility == "HIGH":
+            st.error(f"? HIGH VOLATILITY ({pred.volatility_conf}%)")
+        elif pred.volatility == "LOW":
+            st.success(f"?? LOW VOLATILITY ({pred.volatility_conf}%)")
+        else:
+            st.info("Volatility: Unknown")
+
+    with col2:
+        if not pred.can_trade:
+            st.error(f"?? {pred.risk_reason}")
+        else:
+            st.success("? Trading allowed")
+
+    if not pred.can_trade:
+        st.warning("**Risk limits reached ? no new trades today.**")
+
     with st.expander("Layer contributions", expanded=False):
         contrib = pred.contributions
         cc = pd.DataFrame({"Layer": list(contrib.keys()), "Score": list(contrib.values())})
