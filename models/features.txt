@@ -1,0 +1,6 @@
+pcr
+vol_ratio
+straddle
+wall_asym
+mom_5m
+mom_15m
