@@ -298,6 +298,25 @@ class NiftyAgent:
         blended += momentum_override
 
         # ============================================================
+        # TREND PERSISTENCE (catches slow sustained trends)
+        # ============================================================
+        trend_score = 0.0
+        if len(self.recent_spots) >= 6:
+            last6 = [s[1] for s in self.recent_spots[-6:]]
+            moves = [last6[i] - last6[i-1] for i in range(1, 6)]
+            ups = sum(1 for m in moves if m > 0)
+            downs = sum(1 for m in moves if m < 0)
+            if ups >= 5:
+                trend_score = 0.25
+            elif ups == 4:
+                trend_score = 0.12
+            elif downs >= 5:
+                trend_score = -0.25
+            elif downs == 4:
+                trend_score = -0.12
+        blended += trend_score
+
+        # ============================================================
         # REVERSAL OVERRIDE
         # When Nifty moves sharply against the options layer's direction,
         # trust price over positioning. Forces a signal on trend reversals.
@@ -404,6 +423,7 @@ class NiftyAgent:
                            "cvd": round(cvd_score, 3), "vp_score": round(vp_score, 3),
                            "gex_norm": round(gex_norm, 3),
                            "momentum": round(momentum_override, 3),
+                           "trend": round(trend_score, 3),
                            "ml_prob": round(ml_prob, 3),
                            "vol_conf": round(vol_conf, 1)},
             features=combined_feats,
