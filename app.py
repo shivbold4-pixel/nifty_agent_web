@@ -337,7 +337,11 @@ if pred is not None:
 
     with st.expander("Layer contributions", expanded=False):
         contrib = pred.contributions
-        cc = pd.DataFrame({"Layer": list(contrib.keys()), "Score": list(contrib.values())})
+        # Filter to numeric values only (regime is a string label, not a score)
+        numeric_contrib = {k: v for k, v in contrib.items()
+                           if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        cc = pd.DataFrame({"Layer": list(numeric_contrib.keys()),
+                           "Score": list(numeric_contrib.values())})
         fig = go.Figure(go.Bar(x=cc["Score"], y=cc["Layer"], orientation="h",
                                marker=dict(color=["#00A043" if v > 0.05 else "#D32F2F" if v < -0.05 else "#999" for v in cc["Score"]])))
         fig.update_layout(height=200, margin=dict(l=0, r=0, t=10, b=0),
