@@ -313,6 +313,19 @@ if pred is not None:
         else:
             st.info("Volatility: Unknown")
 
+    # Regime badge
+    regime_name = pred.contributions.get("regime", "UNKNOWN")
+    regime_colors = {
+        "TRENDING_UP": "??",
+        "TRENDING_DOWN": "??",
+        "CHOPPY": "??",
+        "VOLATILE": "??",
+        "CRISIS": "??",
+        "WARMUP": "?",
+        "UNKNOWN": "?",
+    }
+    st.markdown(f"**Market Regime:** {regime_name}")
+
     with col2:
         if not pred.can_trade:
             st.error(f"BLOCKED: {pred.risk_reason}")

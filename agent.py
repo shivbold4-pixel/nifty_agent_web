@@ -10,6 +10,7 @@ import yaml
 from cloud_store import CloudStore
 from cloud_learner import CloudLearner
 from volatility_model import VolatilityModel
+from regime_detector import RegimeDetector
 from risk_manager import RiskManager
 
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
@@ -377,6 +378,18 @@ class NiftyAgent:
             action = "BUY NIFTY FUT" if direction == "BULLISH" else "SELL NIFTY FUT"
 
         # ==================================================
+        # REGIME DETECTION
+        # ==================================================
+        try:
+            self.regime_detector.update(_spot_now, self.vix)
+            regime_info = self.regime_detector.status()
+            regime_size = self.regime_detector.size_multiplier()
+        except Exception as _e:
+            print(f"[agent] regime error: {_e}")
+            regime_info = {"regime": "UNKNOWN", "confidence": 0.0, "size_mult": 0.5}
+            regime_size = 0.5
+
+        # ==================================================
         # VOLATILITY MODEL C inference
         # ==================================================
         vol_label = "UNKNOWN"
@@ -402,6 +415,7 @@ class NiftyAgent:
         else:
             action_note = ""
 
+        base_mult *= regime_size
         base_mult = self.risk.adjust_size_mult(base_mult)
 
         # Override action if risk says stop
@@ -424,8 +438,10 @@ class NiftyAgent:
                            "gex_norm": round(gex_norm, 3),
                            "momentum": round(momentum_override, 3),
                            "trend": round(trend_score, 3),
+                           "regime_conf": round(regime_info.get("confidence", 0), 1),
                            "ml_prob": round(ml_prob, 3),
-                           "vol_conf": round(vol_conf, 1)},
+                           "vol_conf": round(vol_conf, 1),
+                           "regime": regime_info.get("regime", "UNKNOWN")},
             features=combined_feats,
         )
 
