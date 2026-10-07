@@ -1,8 +1,7 @@
 """
-Automated NSE data fetcher (v7 ? DNS-safe).
-- Supabase writes use direct HTTP (no supabase-py DNS issues)
-- indiaopt import delayed until after Supabase handshake
-- Aggressive DNS warm-up + retry
+Autonomous Nifty Agent ? runs fetcher + agent in one loop.
+Fetches NSE data every 5 min, runs agent, saves predictions to Supabase.
+No browser needed.
 """
 import os
 import time
@@ -14,6 +13,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
 
 from nselib import capital_market
+from agent import NiftyAgent
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -29,24 +29,22 @@ def _get_env():
 
 
 def ensure_dns(url: str, max_attempts: int = 8) -> bool:
-    """Force DNS resolution with retries before any heavy imports."""
     host = url.replace("https://", "").replace("http://", "").split("/")[0]
     for attempt in range(1, max_attempts + 1):
         try:
             ip = socket.gethostbyname(host)
-            print(f"[auto_fetcher] DNS OK: {host} -> {ip}")
+            print(f"[dns] OK: {host} -> {ip}")
             return True
         except Exception as e:
-            print(f"[auto_fetcher] DNS attempt {attempt}/{max_attempts}: {e}")
+            print(f"[dns] attempt {attempt}/{max_attempts}: {e}")
             time.sleep(2)
     return False
 
 
 # ============================================================
-# SUPABASE ? direct HTTP (no supabase-py)
+# SUPABASE ? direct HTTP
 # ============================================================
 def supabase_insert(url: str, key: str, table: str, record: dict) -> bool:
-    """POST to Supabase REST API directly."""
     endpoint = f"{url.rstrip('/')}/rest/v1/{table}"
     headers = {
         "apikey": key,
@@ -72,6 +70,28 @@ def supabase_insert(url: str, key: str, table: str, record: dict) -> bool:
     return False
 
 
+def supabase_update(url: str, key: str, table: str,
+                    where: dict, values: dict) -> bool:
+    """Update rows matching `where` with `values`. where={'col': val}"""
+    params = "&".join(f"{k}=eq.{v}" for k, v in where.items())
+    endpoint = f"{url.rstrip('/')}/rest/v1/{table}?{params}"
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
+    try:
+        r = requests.patch(endpoint, json=values, headers=headers, timeout=15)
+        if r.status_code in (200, 204):
+            return True
+        print(f"[supabase] update HTTP {r.status_code}: {r.text[:150]}")
+        return False
+    except Exception as e:
+        print(f"[supabase] update error: {e}")
+        return False
+
+
 # ============================================================
 # NIFTY + VIX
 # ============================================================
@@ -80,7 +100,6 @@ def fetch_nifty_and_vix() -> Tuple[Optional[float], Optional[float]]:
         df = capital_market.market_watch_all_indices()
         if df is None or len(df) == 0:
             return None, None
-
         sym_col, ltp_col = None, None
         for col in df.columns:
             cl = col.lower()
@@ -88,11 +107,9 @@ def fetch_nifty_and_vix() -> Tuple[Optional[float], Optional[float]]:
                 sym_col = col
             if cl in ("last", "ltp", "last_price", "lastprice"):
                 ltp_col = col
-
         if not sym_col or not ltp_col:
             return None, None
-
-        nifty, vix = None, None
+        nifty = vix = None
         for _, row in df.iterrows():
             sym = str(row.get(sym_col, "")).strip().upper()
             try:
@@ -103,110 +120,216 @@ def fetch_nifty_and_vix() -> Tuple[Optional[float], Optional[float]]:
                 nifty = val
             elif sym == "INDIA VIX":
                 vix = val
-
         return nifty, vix
     except Exception as e:
-        print(f"[auto_fetcher] Nifty/VIX error: {e}")
+        print(f"[fetch] Nifty/VIX error: {e}")
         return None, None
 
 
 # ============================================================
-# OPTION CHAIN ? lazy indiaopt import
+# OPTION CHAIN ? cookie-aware NSE API
 # ============================================================
-def fetch_option_chain(spot: float = None) -> Optional[list]:
-    try:
-        import asyncio
-        from indiaopt import NSEClient  # <-- IMPORTANT: delayed import
+class NSEOptionChainFetcher:
+    HOME = "https://www.nseindia.com"
+    DERIVATIVES = "https://www.nseindia.com/market-data/derivatives"
+    API = "https://www.nseindia.com/api/option-chain-indices"
 
-        async def _fetch():
-            async with NSEClient() as nse:
-                result = await nse.fetch_option_chain("NIFTY")
-                all_rows = []
-                for row in result.atm_window(n=200):
-                    all_rows.append({
-                        "strike": float(row.strike),
-                        "call_oi": float(row.call_oi or 0),
-                        "call_oi_change": float(getattr(row, "call_oi_change", 0) or 0),
-                        "call_ltp": float(row.call_ltp or 0),
-                        "call_iv": float(getattr(row, "call_iv", 0) or 0),
-                        "call_volume": float(getattr(row, "call_volume", 0) or 0),
-                        "put_oi": float(row.put_oi or 0),
-                        "put_oi_change": float(getattr(row, "put_oi_change", 0) or 0),
-                        "put_ltp": float(row.put_ltp or 0),
-                        "put_iv": float(getattr(row, "put_iv", 0) or 0),
-                        "put_volume": float(getattr(row, "put_volume", 0) or 0),
-                    })
-                return all_rows
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/120.0.0.0 Safari/537.36"),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+        self._last_cookie = 0
 
-        all_rows = asyncio.run(_fetch())
-        if not all_rows:
+    def _handshake(self):
+        try:
+            self.session.get(self.HOME, timeout=15)
+            time.sleep(0.5)
+            self.session.get(self.DERIVATIVES, timeout=15)
+            time.sleep(0.5)
+            self._last_cookie = time.time()
+            print("[nse] Cookie handshake complete")
+        except Exception as e:
+            print(f"[nse] Handshake failed: {e}")
+
+    def fetch(self, symbol="NIFTY") -> Optional[pd.DataFrame]:
+        if time.time() - self._last_cookie > 300:
+            self._handshake()
+        self.session.headers["Referer"] = self.DERIVATIVES
+        try:
+            r = self.session.get(self.API, params={"symbol": symbol}, timeout=15)
+            if r.status_code != 200:
+                print(f"[nse] HTTP {r.status_code}")
+                self._last_cookie = 0
+                return None
+            if "json" not in r.headers.get("Content-Type", ""):
+                self._last_cookie = 0
+                return None
+            data = r.json()
+            if "records" not in data or "data" not in data["records"]:
+                self._last_cookie = 0
+                return None
+            rows = []
+            for rec in data["records"]["data"]:
+                ce = rec.get("CE", {})
+                pe = rec.get("PE", {})
+                rows.append({
+                    "strike": rec.get("strikePrice"),
+                    "call_oi": ce.get("openInterest", 0),
+                    "call_oi_change": ce.get("changeinOpenInterest", 0),
+                    "call_ltp": ce.get("lastPrice", 0),
+                    "call_iv": ce.get("impliedVolatility", 0),
+                    "call_volume": ce.get("totalTradedVolume", 0),
+                    "put_oi": pe.get("openInterest", 0),
+                    "put_oi_change": pe.get("changeinOpenInterest", 0),
+                    "put_ltp": pe.get("lastPrice", 0),
+                    "put_iv": pe.get("impliedVolatility", 0),
+                    "put_volume": pe.get("totalTradedVolume", 0),
+                })
+            return pd.DataFrame(rows).sort_values("strike").reset_index(drop=True)
+        except Exception as e:
+            print(f"[nse] Fetch error: {e}")
+            self._last_cookie = 0
             return None
 
-        if spot is None or spot <= 0:
-            combined = {r["strike"]: r["call_oi"] + r["put_oi"] for r in all_rows}
-            spot = max(combined, key=combined.get)
 
-        window = 500
-        filtered = [r for r in all_rows if abs(r["strike"] - spot) <= window]
-        filtered.sort(key=lambda r: r["strike"])
-        return filtered
-    except Exception as e:
-        print(f"[indiaopt] Fetch error: {e}")
+_nse_fetcher = NSEOptionChainFetcher()
+
+
+def fetch_option_chain(spot=None) -> Optional[pd.DataFrame]:
+    df = _nse_fetcher.fetch("NIFTY")
+    if df is None or len(df) == 0:
         return None
+    if spot and spot > 0:
+        window = 500
+        df = df[abs(df["strike"] - spot) <= window].reset_index(drop=True)
+    return df
 
 
 # ============================================================
-# MAIN CYCLE
+# AGENT + STORAGE LOOP
 # ============================================================
-def fetch_and_store(url: str, key: str) -> bool:
+def _clean_features(feats: dict) -> dict:
+    """Convert numpy types to Python native for JSON."""
+    out = {}
+    for k, v in feats.items():
+        if isinstance(v, str):
+            out[k] = v
+        else:
+            try:
+                out[k] = float(v)
+            except (ValueError, TypeError):
+                out[k] = 0.0
+    return out
+
+
+def run_one_cycle(url: str, key: str, agent: NiftyAgent) -> bool:
     nifty, vix = fetch_nifty_and_vix()
     chain = fetch_option_chain(spot=nifty)
 
-    if nifty is None and vix is None and chain is None:
-        print("[auto_fetcher] All fetches failed.")
-        return False
+    # Save live_data
+    chain_records = []
+    if chain is not None and len(chain) > 0:
+        chain_records = json.loads(chain.to_json(orient="records", default_handler=str))
 
-    record = {
+    supabase_insert(url, key, "live_data", {
         "ts_ist": now_ist().strftime("%Y-%m-%d %H:%M:%S"),
         "nifty_spot": float(nifty) if nifty else None,
         "india_vix": float(vix) if vix else None,
-        "chain_rows": len(chain) if chain else 0,
-        "chain_json": chain if chain else [],
+        "chain_rows": len(chain) if chain is not None else 0,
+        "chain_json": chain_records,
+    })
+
+    # Run agent
+    if chain is None or len(chain) == 0 or not nifty:
+        print("[cycle] No chain or Nifty. Skipping agent.")
+        return False
+
+    # Label previous prediction with new spot
+    if agent._pending is not None:
+        try:
+            realized_bps = (nifty - agent._pending["spot"]) / agent._pending["spot"] * 1e4
+            label = 1 if realized_bps > 0 else 0
+            supabase_update(url, key, "predictions",
+                            where={"pred_ts": agent._pending["ts"]},
+                            values={"outcome_bps": round(realized_bps, 3),
+                                    "realized_label": label})
+            print(f"[label] prev pred labeled: bps={realized_bps:.2f}, label={label}")
+        except Exception as e:
+            print(f"[label] error: {e}")
+        agent._pending = None
+
+    # New prediction
+    try:
+        agent.on_option_chain(chain, spot=nifty, vix=vix)
+        pred = agent.predict()
+    except Exception as e:
+        print(f"[cycle] agent error: {e}")
+        return False
+
+    # Save prediction
+    pred_record = {
+        "pred_ts": float(pred.ts),
+        "ts_ist": now_ist().strftime("%Y-%m-%d %H:%M:%S"),
+        "spot": float(pred.spot),
+        "direction": str(pred.direction),
+        "score": float(pred.score),
+        "confidence": float(pred.confidence),
+        "regime": str(pred.regime),
+        "action": str(pred.action),
+        "features": _clean_features(pred.features),
     }
+    supabase_insert(url, key, "predictions", pred_record)
 
-    ok = supabase_insert(url, key, "live_data", record)
-    if ok:
-        print(f"[auto_fetcher] {now_ist():%H:%M:%S} | Nifty={nifty} | VIX={vix} | "
-              f"Chain={len(chain) if chain else 0} rows")
-    return ok
+    # Print status
+    vol = getattr(pred, "volatility", "?")
+    print(f"[{now_ist():%H:%M:%S}] {pred.direction:8s} | conf={pred.confidence:5.1f}% | "
+          f"vol={vol:8s} | {pred.action}")
+
+    return True
 
 
-# ============================================================
-# MAIN LOOP
-# ============================================================
 def run_loop(interval_sec: int = 300):
     url, key = _get_env()
     if not url or not key:
-        print("[auto_fetcher] ERROR: set SUPABASE_URL and SUPABASE_KEY env vars")
-        print(f"  SUPABASE_URL={url!r}")
-        print(f"  SUPABASE_KEY={'***' if key else None}")
+        print("[startup] ERROR: set SUPABASE_URL and SUPABASE_KEY")
         return
 
-    # DNS warm-up BEFORE any heavy imports
     if not ensure_dns(url):
-        print("[auto_fetcher] Cannot resolve Supabase. Check network / URL.")
+        print("[startup] DNS failed. Exiting.")
         return
 
-    print(f"[auto_fetcher] Starting. Interval: {interval_sec}s. Ctrl+C to stop.")
+    print("[startup] Initializing agent (loads ML model)...")
+    try:
+        agent = NiftyAgent()
+        print("[startup] Agent ready.")
+    except Exception as e:
+        print(f"[startup] Agent init failed: {e}")
+        return
+
+    print(f"[startup] Starting autonomous loop. Interval: {interval_sec}s. Ctrl+C to stop.")
 
     while True:
+        # Auto-stop at 3:15 PM IST
+        now = now_ist()
+        if now.hour == 15 and now.minute >= 15:
+            print("[loop] 3:15 PM reached. Stopping before CAS window.")
+            break
+        if now.hour > 15:
+            print("[loop] Past market hours. Stopping.")
+            break
+
         try:
-            fetch_and_store(url, key)
+            run_one_cycle(url, key, agent)
         except KeyboardInterrupt:
-            print("\n[auto_fetcher] Stopped.")
+            print("\n[loop] Stopped by user.")
             break
         except Exception as e:
-            print(f"[auto_fetcher] Cycle error: {e}")
+            print(f"[loop] Cycle error: {e}")
         time.sleep(interval_sec)
 
 
