@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 import pandas as pd
 import plotly.graph_objects as go
 from supabase import create_client
@@ -19,6 +20,9 @@ def now_ist():
 
 st.set_page_config(page_title="Nifty Agent", page_icon="N",
                    layout="centered", initial_sidebar_state="collapsed")
+
+# Auto-refresh every 60 seconds
+st_autorefresh(interval=60000, key="auto_refresh")
 
 st.markdown("""
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -222,9 +226,4 @@ st.markdown(f"<p style='text-align:center; opacity:0.4; font-size:0.75rem;'>"
             f"Read-only view | Data from autonomous fetcher | "
             f"Auto-refresh in 60s</p>", unsafe_allow_html=True)
 
-# Auto-refresh every 60s
-st.markdown("""
-<script>
-setTimeout(function(){ window.location.reload(); }, 60000);
-</script>
-""", unsafe_allow_html=True)
+# Auto-refresh handled by st_autorefresh at top
