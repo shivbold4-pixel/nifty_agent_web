@@ -127,87 +127,48 @@ def fetch_nifty_and_vix() -> Tuple[Optional[float], Optional[float]]:
 
 
 # ============================================================
-# OPTION CHAIN ? cookie-aware NSE API
+# OPTION CHAIN ? indiaopt (reliable NSE access)
 # ============================================================
-class NSEOptionChainFetcher:
-    HOME = "https://www.nseindia.com"
-    DERIVATIVES = "https://www.nseindia.com/market-data/derivatives"
-    API = "https://www.nseindia.com/api/option-chain-indices"
+import asyncio
 
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                           "AppleWebKit/537.36 (KHTML, like Gecko) "
-                           "Chrome/120.0.0.0 Safari/537.36"),
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
-        self._last_cookie = 0
+def fetch_option_chain(spot=None):
+    try:
+        from indiaopt import NSEClient
 
-    def _handshake(self):
-        try:
-            self.session.get(self.HOME, timeout=15)
-            time.sleep(0.5)
-            self.session.get(self.DERIVATIVES, timeout=15)
-            time.sleep(0.5)
-            self._last_cookie = time.time()
-            print("[nse] Cookie handshake complete")
-        except Exception as e:
-            print(f"[nse] Handshake failed: {e}")
+        async def _fetch():
+            async with NSEClient() as nse:
+                result = await nse.fetch_option_chain("NIFTY")
+                rows = []
+                for row in result.atm_window(n=200):
+                    rows.append({
+                        "expiry": str(getattr(row, "expiry", "")),
+                        "strike": float(row.strike),
+                        "call_oi": float(row.call_oi or 0),
+                        "call_oi_change": float(getattr(row, "call_oi_change", 0) or 0),
+                        "call_ltp": float(row.call_ltp or 0),
+                        "call_iv": float(getattr(row, "call_iv", 0) or 0),
+                        "call_volume": float(getattr(row, "call_volume", 0) or 0),
+                        "put_oi": float(row.put_oi or 0),
+                        "put_oi_change": float(getattr(row, "put_oi_change", 0) or 0),
+                        "put_ltp": float(row.put_ltp or 0),
+                        "put_iv": float(getattr(row, "put_iv", 0) or 0),
+                        "put_volume": float(getattr(row, "put_volume", 0) or 0),
+                    })
+                return rows
 
-    def fetch(self, symbol="NIFTY") -> Optional[pd.DataFrame]:
-        if time.time() - self._last_cookie > 300:
-            self._handshake()
-        self.session.headers["Referer"] = self.DERIVATIVES
-        try:
-            r = self.session.get(self.API, params={"symbol": symbol}, timeout=15)
-            if r.status_code != 200:
-                print(f"[nse] HTTP {r.status_code}")
-                self._last_cookie = 0
-                return None
-            if "json" not in r.headers.get("Content-Type", ""):
-                self._last_cookie = 0
-                return None
-            data = r.json()
-            if "records" not in data or "data" not in data["records"]:
-                self._last_cookie = 0
-                return None
-            rows = []
-            for rec in data["records"]["data"]:
-                ce = rec.get("CE", {})
-                pe = rec.get("PE", {})
-                rows.append({
-                    "strike": rec.get("strikePrice"),
-                    "call_oi": ce.get("openInterest", 0),
-                    "call_oi_change": ce.get("changeinOpenInterest", 0),
-                    "call_ltp": ce.get("lastPrice", 0),
-                    "call_iv": ce.get("impliedVolatility", 0),
-                    "call_volume": ce.get("totalTradedVolume", 0),
-                    "put_oi": pe.get("openInterest", 0),
-                    "put_oi_change": pe.get("changeinOpenInterest", 0),
-                    "put_ltp": pe.get("lastPrice", 0),
-                    "put_iv": pe.get("impliedVolatility", 0),
-                    "put_volume": pe.get("totalTradedVolume", 0),
-                })
-            return pd.DataFrame(rows).sort_values("strike").reset_index(drop=True)
-        except Exception as e:
-            print(f"[nse] Fetch error: {e}")
-            self._last_cookie = 0
+        all_rows = asyncio.run(_fetch())
+        if not all_rows:
+            print("[chain] indiaopt returned no data")
             return None
 
-
-_nse_fetcher = NSEOptionChainFetcher()
-
-
-def fetch_option_chain(spot=None) -> Optional[pd.DataFrame]:
-    df = _nse_fetcher.fetch("NIFTY")
-    if df is None or len(df) == 0:
+        df = pd.DataFrame(all_rows)
+        if spot and spot > 0:
+            df = df[abs(df["strike"] - spot) <= 500].reset_index(drop=True)
+        print(f"[chain] {len(df)} strikes fetched")
+        return df
+    except Exception as e:
+        print(f"[chain] error: {e}")
         return None
-    if spot and spot > 0:
-        window = 500
-        df = df[abs(df["strike"] - spot) <= window].reset_index(drop=True)
-    return df
 
 
 # ============================================================
@@ -281,7 +242,12 @@ def run_one_cycle(url: str, key: str, agent: NiftyAgent) -> bool:
         "confidence": float(pred.confidence),
         "regime": str(pred.regime),
         "action": str(pred.action),
-        "features": _clean_features(pred.features),
+        "features": {
+            **_clean_features(pred.features),
+            "vol_conf": float(getattr(pred, "volatility_conf", 0) or 0),
+            "vol_label": str(getattr(pred, "volatility", "UNKNOWN")),
+            "regime": str(pred.regime),
+        },
     }
     supabase_insert(url, key, "predictions", pred_record)
 

@@ -141,12 +141,16 @@ class CloudLearner:
             preds = clf.predict(X_s[n_train:])
             acc = float(accuracy_score(y[n_train:], preds))
 
-        # Promote to production model
-        self.clf = clf
-        self.scaler = scaler
-        self.n_seen = len(X)
-        self._fitted = True
-        self._save_to_cloud()
+        # Promote to production model ONLY if accuracy is acceptable
+        if acc >= 0.52:
+            self.clf = clf
+            self.scaler = scaler
+            self.n_seen = len(X)
+            self._fitted = True
+            self._save_to_cloud()
+            print(f"[cloud_learner] Promoted new model with accuracy: {acc:.4f}")
+        else:
+            print(f"[cloud_learner] REJECTED new model. Accuracy {acc:.4f} below 0.52 threshold.")
 
         return {
             "status": "ok",

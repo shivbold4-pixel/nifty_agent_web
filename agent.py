@@ -11,6 +11,7 @@ from cloud_store import CloudStore
 from cloud_learner import CloudLearner
 from volatility_model import VolatilityModel
 from regime_detector import RegimeDetector
+from trend_maturity import TrendMaturityFilter
 from risk_manager import RiskManager
 
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
@@ -68,7 +69,7 @@ def option_features(df, spot=None):
     pcr = total_put / total_call
     d_call = df.call_oi_change.sum() if "call_oi_change" in df else 0
     d_put = df.put_oi_change.sum() if "put_oi_change" in df else 0
-    pcr_change = (d_put / d_call) if d_call else 1.0
+    oi_change_ratio = (d_put / d_call) if d_call else 1.0
     atm_idx = (df.strike - spot).abs().idxmin()
     atm_row = df.loc[atm_idx]
     atm = float(atm_row.strike)
@@ -76,12 +77,62 @@ def option_features(df, spot=None):
     iv_skew = float(atm_row.put_iv - atm_row.call_iv) if "call_iv" in df else 0.0
     call_wall = float(df.nlargest(min(3, len(df)), "call_oi").strike.mean())
     put_wall = float(df.nlargest(min(3, len(df)), "put_oi").strike.mean())
-    wall_asym = (put_wall - call_wall) / max(spot, 1)
+    # F01 FIX: Measure spot's position between the walls. Neutral = 0.0
+    wall_range = max(call_wall - put_wall, 1.0)
+    wall_asym = ((spot - put_wall) / wall_range) - 0.5
+    # ---------- Extra features for v3 model ----------
+    # 1. vol_ratio
+    try:
+        total_call_vol = df.call_volume.sum() if "call_volume" in df.columns else 0
+        total_put_vol = df.put_volume.sum() if "put_volume" in df.columns else 0
+        vol_ratio = total_put_vol / max(total_call_vol, 1)
+    except Exception:
+        vol_ratio = 1.0
+
+    # 2. wall_asym (v3 name ? same as wall_asymmetry)
+    wall_asym = wall_asym  # already computed above
+
+    # 3. max_pain_dist
+    try:
+        strikes = df.strike.values
+        pain = []
+        for s in strikes:
+            cp = ((s - df.strike).clip(lower=0) * df.call_oi).sum()
+            pp = ((df.strike - s).clip(lower=0) * df.put_oi).sum()
+            pain.append(cp + pp)
+        max_pain = float(strikes[int(np.argmin(pain))])
+        max_pain_dist = (max_pain - spot) / max(spot, 1)
+    except Exception:
+        max_pain = 0.0
+        max_pain_dist = 0.0
+
+    # 4. days_to_expiry ? from expiry column if present, else 7
+    try:
+        if "expiry" in df.columns:
+            exp_str = str(df["expiry"].iloc[0])
+            exp_dt = pd.to_datetime(exp_str)
+            dte = (exp_dt - pd.Timestamp.now()).total_seconds() / 86400.0
+            dte = max(dte, 0.0)
+        else:
+            dte = 7.0
+    except Exception:
+        dte = 7.0
+
+    # 5. pc_premium_ratio (ATM put price / call price)
+    try:
+        pc_premium_ratio = float(atm_row.put_ltp) / (float(atm_row.call_ltp) + 1e-6)
+    except Exception:
+        pc_premium_ratio = 1.0
+
     return {
-        "spot": spot, "atm": atm, "pcr": pcr, "pcr_change": pcr_change,
-        "iv_skew": iv_skew, "wall_asymmetry": wall_asym,
+        "spot": spot, "atm": atm, "pcr": pcr, "oi_change_ratio": oi_change_ratio,
+        "iv_skew": iv_skew, "wall_asymmetry": wall_asym, "wall_asym": wall_asym,
         "straddle_bps": straddle / max(spot, 1) * 1e4,
         "call_wall": call_wall, "put_wall": put_wall, "straddle": straddle,
+        "vol_ratio": vol_ratio,
+        "max_pain_dist": max_pain_dist,
+        "days_to_expiry": dte,
+        "pc_premium_ratio": pc_premium_ratio,
     }
 
 
@@ -119,9 +170,9 @@ def classify_regime(vix, cfg):
 
 OPTION_WEIGHTS = {"pcr": 0.35, "pcr_change": 0.20, "iv_skew": -0.20,
                   "wall_asymmetry": 0.20, "straddle_bps": -0.05}
-OPTION_CENTERS = {"pcr": 1.0, "pcr_change": 1.0, "iv_skew": 0.0,
+OPTION_CENTERS = {"pcr": 1.0, "pcr_change": 0.0, "iv_skew": 0.0,
                   "wall_asymmetry": 0.0, "straddle_bps": 80.0}
-OPTION_SCALES = {"pcr": 0.30, "pcr_change": 0.30, "iv_skew": 5.0,
+OPTION_SCALES = {"pcr": 0.30, "pcr_change": 0.05, "iv_skew": 5.0,
                  "wall_asymmetry": 0.02, "straddle_bps": 100.0}
 DEPTH_WEIGHTS = {"ofi": 0.40, "microprice_drift": 0.20, "weighted_obi": 0.15,
                  "obi": 0.15, "queue_imb": 0.10}
@@ -170,9 +221,21 @@ class NiftyAgent:
         self._pending = None
         self.vol_model = VolatilityModel()
         self.risk = RiskManager()
+        self.regime_detector = RegimeDetector()
+        self.vix = 0.0 # F04 FIX: Prevent AttributeError if vix is missing
+        self.tmf = TrendMaturityFilter()
+        self._last_signal_direction = None
+        self._last_signal_time = 0.0
 
     def on_option_chain(self, df, spot=None, vix=None):
         feats = option_features(df, spot=spot)
+        
+        # Calculate TRUE PCR change (Current PCR - Previous PCR)
+        if self.last_option_feats is not None and "pcr" in self.last_option_feats:
+            feats["pcr_change"] = feats["pcr"] - self.last_option_feats["pcr"]
+        else:
+            feats["pcr_change"] = 0.0
+            
         self.last_option_feats = feats
         self.last_option_ts = time.time()
         if vix is not None:
@@ -225,12 +288,27 @@ class NiftyAgent:
             blended *= 0.5
 
         combined_feats = {**self.last_option_feats, **self.last_depth_feats, **self.last_cvd_feats}
+        combined_feats.setdefault('mom_5m', 0.0)
+        combined_feats.setdefault('mom_15m', 0.0)
+        combined_feats.setdefault('vol_ratio', 1.0)
+        combined_feats.setdefault('wall_asym', 0.0)
 
         ml_prob = 0.5
         if self.learner is not None:
             ml_prob = self.learner.prob_up(combined_feats)
             if self.learner.is_ready():
                 blended = 0.70 * blended + 0.30 * (ml_prob - 0.5) * 2
+
+        # ============================================================
+        # TREND MATURITY FILTER v2
+        # ============================================================
+        _spot_now = self.last_option_feats["spot"]
+        self.tmf.update(_spot_now)
+        tmf_info = self.tmf.compute()
+        tmf_score = tmf_info.get("suppression", 1.0)
+        tmf_state = tmf_info.get("state", "UNKNOWN")
+        tmf_suppression = tmf_info.get("suppression", 1.0)
+        tmf_hint = tmf_info.get("direction_hint", 0)
 
         # ============================================================
         # MULTI-TIMEFRAME MOMENTUM ENGINE
@@ -345,9 +423,33 @@ class NiftyAgent:
         elif gex_norm > 0.2:
             blended *= 0.85  # mean-reverting regime ? dampen
 
+        # ---- TMF v3 Suppression ----
+        # Get TMF state for logging
+        tmf_score = tmf_info.get("suppression", 1.0)
+        tmf_state = tmf_info.get("state", "UNKNOWN")
+        blended *= tmf_score
+
+        # Directional hint: if healthy trend detected, do NOT suppress
+
         if np.isnan(blended):
             blended = 0.0
         blended = float(np.clip(blended, -1, 1))
+
+        # ---- SIGNAL COOLDOWN ----
+        import time as _time
+        _now_ts = _time.time()
+        _new_direction = "BULLISH" if blended > 0.35 else ("BEARISH" if blended < -0.35 else "FLAT")
+
+        if (self._last_signal_direction is not None
+                and self._last_signal_direction == _new_direction
+                and _new_direction != "FLAT"
+                and (_now_ts - self._last_signal_time) < 900):  # 15 min
+            # Same direction within 15 min ? reduce by 25%
+            blended *= 0.75
+
+        if _new_direction != "FLAT":
+            self._last_signal_direction = _new_direction
+            self._last_signal_time = _now_ts
 
         th = self.cfg["agent"]["direction_threshold"]
         if blended > th: direction = "BULLISH"
@@ -359,7 +461,13 @@ class NiftyAgent:
         straddle = self.last_option_feats.get("straddle", 50)
         exp_pts = round(abs(blended) * max(straddle * 0.15, 5.0), 1)
 
-        atr_proxy = max(straddle * 0.15, 8.0)
+        # DYNAMIC ATR PROXY
+        if len(self.recent_spots) >= 5:
+            recent_prices = [s[1] for s in self.recent_spots[-5:]]
+            true_range = max(recent_prices) - min(recent_prices)
+            atr_proxy = max(true_range, 5.0)
+        else:
+            atr_proxy = max(straddle * 0.15, 8.0)
         rk = self.cfg["risk"]
         if direction == "BULLISH":
             stop = round(spot - atr_proxy * rk["stop_atr_mult"], 1)
@@ -390,6 +498,28 @@ class NiftyAgent:
             regime_size = 0.5
 
         # ==================================================
+        # MOMENTUM FEATURES (for v3 model)
+        # ==================================================
+        try:
+            if len(self.recent_spots) >= 2:
+                _now = self.recent_spots[-1][1]
+                _prev = self.recent_spots[-2][1]
+                combined_feats["mom_5m"] = (_now - _prev) / _prev if _prev > 0 else 0.0
+            else:
+                combined_feats["mom_5m"] = 0.0
+
+            if len(self.recent_spots) >= 4:
+                _now = self.recent_spots[-1][1]
+                _prev = self.recent_spots[-4][1]
+                combined_feats["mom_15m"] = (_now - _prev) / _prev if _prev > 0 else 0.0
+            else:
+                combined_feats["mom_15m"] = 0.0
+        except Exception as _e:
+            print(f"[agent] momentum error: {_e}")
+            combined_feats["mom_5m"] = 0.0
+            combined_feats["mom_15m"] = 0.0
+
+        # ==================================================
         # VOLATILITY MODEL C inference
         # ==================================================
         vol_label = "UNKNOWN"
@@ -408,10 +538,10 @@ class NiftyAgent:
         base_mult = size_mult
         if vol_label == "HIGH" and vol_conf >= 60:
             base_mult *= 1.3
-            action_note = " (High vol - size up)"
+            action_note = f" (Vol: {vol_label})" if vol_label != "UNKNOWN" else ""
         elif vol_label == "LOW" and vol_conf >= 60:
             base_mult *= 0.7
-            action_note = " (Low vol - size down)"
+            action_note = f" (Vol: {vol_label})" if vol_label != "UNKNOWN" else ""
         else:
             action_note = ""
 
@@ -427,7 +557,7 @@ class NiftyAgent:
         pred = Prediction(
             ts=time.time(), spot=spot, direction=direction,
             score=round(blended, 3), confidence=confidence,
-            expected_points=exp_pts, regime=regime, size_mult=size_mult,
+            expected_points=exp_pts, regime=regime, size_mult=round(base_mult, 2),
             action=action, stop_loss=stop, take_profit=target,
             volatility=vol_label,
             volatility_conf=vol_conf,
@@ -439,6 +569,8 @@ class NiftyAgent:
                            "momentum": round(momentum_override, 3),
                            "trend": round(trend_score, 3),
                            "regime_conf": round(regime_info.get("confidence", 0), 1),
+                           "tmf": round(tmf_score, 3),
+                           "tmf_state": tmf_state,
                            "ml_prob": round(ml_prob, 3),
                            "vol_conf": round(vol_conf, 1),
                            "regime": regime_info.get("regime", "UNKNOWN")},

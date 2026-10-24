@@ -16,5 +16,5 @@ regime:
 
 risk:
   stop_atr_mult: 1.5
-  target_atr_mult: 1.0
+  target_atr_mult: 1.5
   max_spread_pts: 2.0
