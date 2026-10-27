@@ -167,15 +167,15 @@ if pred:
 
     # Volatility + regime from features
     feats = pred.get("features") or {}
-    vol_conf = feats.get("vol_conf", 0)
-    regime = feats.get("regime", "UNKNOWN")
+    vol_conf = pred.get("volatility_conf", 0)
+    regime = pred.get("regime", "UNKNOWN")
 
     col1, col2 = st.columns(2)
     with col1:
         if vol_conf and vol_conf > 60:
             st.success(f"HIGH VOLATILITY ({vol_conf}%)")
         elif vol_conf:
-            st.info(f"LOW VOLATILITY ({vol_conf}%)")
+            st.info(f"Volatility: LOW ({vol_conf}%)")
         else:
             st.info("Volatility: N/A")
     with col2:
