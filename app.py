@@ -162,7 +162,7 @@ if pred:
         <p class="hero-sub">Score {pred["score"]:+.2f} &middot; {pred["regime"]} regime</p>
     </div>""", unsafe_allow_html=True)
 
-    st.markdown(f"**Confidence: {pred['confidence']}%**")
+    st.markdown(f"**Signal Strength: {pred['confidence']}%**")
     st.progress(min(int(pred["confidence"]), 100))
 
     # Volatility + regime from features
@@ -177,7 +177,8 @@ if pred:
         elif vol_conf:
             st.info(f"Volatility: LOW ({vol_conf}%)")
         else:
-            st.info("Volatility: N/A")
+            vol_label = pred.get("volatility", "UNKNOWN")
+            st.info(f"Volatility: {vol_label}")
     with col2:
         st.markdown(f"**Regime:** {regime}")
 
