@@ -51,6 +51,7 @@ def ensure_dns(url):
 # ============================================================
 # SUPABASE ? HTTP helpers
 # ============================================================
+
 def sb_insert(url, key, table, record):
     endpoint = f"{url.rstrip('/')}/rest/v1/{table}"
     headers = {
@@ -58,6 +59,8 @@ def sb_insert(url, key, table, record):
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
         "Prefer": "return=minimal",
+        "Connection": "close",
+        "Connection": "close",
     }
     for attempt in range(3):
         try:
@@ -65,17 +68,14 @@ def sb_insert(url, key, table, record):
             if r.status_code in (200, 201, 204):
                 return True
             print(f"[supabase] HTTP {r.status_code}: {r.text[:150]}")
-            return False
         except Exception as e:
-            err = str(e)
-            if "getaddrinfo" in err or "11001" in err:
-                print(f"[supabase] DNS retry {attempt+1}/3")
-                time.sleep(3)
-            else:
-                print(f"[supabase] error: {e}")
-                return False
+            print(f"[supabase] insert attempt {attempt+1} failed: {e}")
+        
+        # Wait 2 seconds before retrying to let the network recover
+        time.sleep(2)
+    
+    print("[supabase] insert failed after 3 attempts.")
     return False
-
 
 def sb_update(url, key, table, where, values):
     params = "&".join(f"{k}=eq.{v}" for k, v in where.items())
@@ -85,18 +85,46 @@ def sb_update(url, key, table, where, values):
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
         "Prefer": "return=minimal",
+        "Connection": "close",
+        "Connection": "close",
     }
-    try:
-        r = requests.patch(endpoint, json=values, headers=headers, timeout=15)
-        return r.status_code in (200, 204)
-    except Exception as e:
-        print(f"[supabase] update error: {e}")
-        return False
-
-
-# ============================================================
-# NSE ? fetch Nifty, VIX, option chain
-# ============================================================
+    for attempt in range(3):
+        try:
+            r = requests.patch(endpoint, json=values, headers=headers, timeout=15)
+            if r.status_code in (200, 204):
+                return True
+        except Exception as e:
+            print(f"[supabase] update attempt {attempt+1} failed: {e}")
+            
+        # Wait 2 seconds before retrying
+        time.sleep(2)
+        
+    print("[supabase] update failed after 3 attempts.")
+    return False
+def sb_update(url, key, table, where, values):
+    params = "&".join(f"{k}=eq.{v}" for k, v in where.items())
+    endpoint = f"{url.rstrip('/')}/rest/v1/{table}?{params}"
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+        "Connection": "close",
+        "Connection": "close",
+    }
+    for attempt in range(3):
+        try:
+            r = requests.patch(endpoint, json=values, headers=headers, timeout=15)
+            if r.status_code in (200, 204):
+                return True
+        except Exception as e:
+            print(f"[supabase] update attempt {attempt+1} failed: {e}")
+            
+        # Wait 2 seconds before retrying
+        time.sleep(2)
+        
+    print("[supabase] update failed after 3 attempts.")
+    return False
 def fetch_nifty_and_vix():
     try:
         from nselib import capital_market

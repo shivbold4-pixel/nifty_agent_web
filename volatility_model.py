@@ -5,7 +5,7 @@ import numpy as np
 import xgboost as xgb
 from pathlib import Path
 
-MODEL_PATH = Path("models/xgb_nifty.pkl")
+MODEL_PATH = Path("models/xgb_v4_final.json")
 FEATURES_PATH = Path(__file__).parent / "models" / "features.txt"
 
 DEFAULT_FEATURES = ["pcr", "vol_ratio", "straddle", "wall_asym", "mom_5m", "mom_15m"]
@@ -20,24 +20,10 @@ class VolatilityModel:
     def _load(self):
         if MODEL_PATH.exists():
             try:
-                import pickle
-                with open(MODEL_PATH, "rb") as f:
-                    loaded_data = pickle.load(f)
-                
-                # If the .pkl is a dictionary, extract the actual model
-                if isinstance(loaded_data, dict):
-                    if 'model' in loaded_data:
-                        self.model = loaded_data['model']
-                    elif 'xgb_model' in loaded_data:
-                        self.model = loaded_data['xgb_model']
-                    else:
-                        print(f"[vol_model] ERROR: Could not find model in dict. Keys: {loaded_data.keys()}")
-                        self.model = None
-                else:
-                    # It's already the model object
-                    self.model = loaded_data
-                    
-                print(f"[vol_model] Loaded Pickle. Features: {self.features}")
+                import xgboost as xgb
+                self.model = xgb.XGBClassifier()
+                self.model.load_model(str(MODEL_PATH))
+                print(f"[vol_model] Loaded JSON. Features: {self.features}")
             except Exception as e:
                 print(f"[vol_model] Load failed: {e}")
                 self.model = None
@@ -48,7 +34,9 @@ class VolatilityModel:
         if not self.is_ready():
             return "MEDIUM", 0.0
         try:
-            x = np.array([[feat_dict.get(k, 0.0) for k in self.features]])
+            # Force the exact 5 features for the V4 model
+            v4_features = ['pcr', 'vol_ratio', 'straddle', 'wall_asym', 'mom_5m']
+            x = np.array([[feat_dict.get(k, 0.0) for k in v4_features]])
             proba = self.model.predict_proba(x)[0]
             big_prob = float(proba[1])
             if big_prob >= 0.5:

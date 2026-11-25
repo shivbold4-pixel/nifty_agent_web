@@ -463,9 +463,13 @@ class NiftyAgent:
 
         # DYNAMIC ATR PROXY
         if len(self.recent_spots) >= 5:
+            # Better True Range: Include gap from previous close
             recent_prices = [s[1] for s in self.recent_spots[-5:]]
-            true_range = max(recent_prices) - min(recent_prices)
-            atr_proxy = max(true_range, 5.0)
+            ranges = []
+            for j in range(1, len(recent_prices)):
+                high_low = abs(recent_prices[j] - recent_prices[j-1])
+                ranges.append(high_low)
+            atr_proxy = max(sum(ranges)/len(ranges), 5.0) if ranges else 10.0
         else:
             atr_proxy = max(straddle * 0.15, 8.0)
         rk = self.cfg["risk"]
@@ -511,7 +515,7 @@ class NiftyAgent:
             if len(self.recent_spots) >= 4:
                 _now = self.recent_spots[-1][1]
                 _prev = self.recent_spots[-4][1]
-                combined_feats["mom_15m"] = (_now - _prev) / _prev if _prev > 0 else 0.0
+                # mom_15m removed to match V4 model features
             else:
                 combined_feats["mom_15m"] = 0.0
         except Exception as _e:

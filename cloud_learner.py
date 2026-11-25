@@ -105,6 +105,8 @@ class CloudLearner:
         Returns stats dict.
         """
         rows = self.cloud.fetch_labeled(limit=10000)
+        # Sort chronologically to prevent future-to-past leakage
+        rows.sort(key=lambda x: x.get("ts_ist", ""))
         if len(rows) < 100:
             return {"status": "insufficient_data", "n": len(rows)}
 
@@ -162,6 +164,8 @@ class CloudLearner:
     # ---------------- Feature attribution ----------------
     def compute_feature_stats(self) -> list:
         rows = self.cloud.fetch_labeled(limit=10000)
+        # Sort chronologically to prevent future-to-past leakage
+        rows.sort(key=lambda x: x.get("ts_ist", ""))
         if len(rows) < 50:
             return []
         stats = []
